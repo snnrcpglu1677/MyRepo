@@ -1,0 +1,55 @@
+PKeep_SH_SubState.PKSH_ANALYZE_CHECK_TARGET:
+  FOR i := 1 TO 15 DO
+    IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+
+      IF (ABS(CurrentRangeStart[i] - NewRangeStart[i]) <= PosEps) AND
+         (ABS(CurrentRangeEnd[i] - NewRangeEnd[i]) <= PosEps) THEN
+        PunchDone[i] := TRUE;
+        MoveTypeCandidate[i] := 1; (* NO_MOVE *)
+      ELSE
+        overlapFound := FALSE;
+
+        (* --- diğer keep punch'lara karşı kontrol --- *)
+        FOR j := 1 TO 15 DO
+          IF (j <> i) AND PunchActive[j] THEN
+
+            IF PunchDone[j] THEN
+              (* Tamamlanmış punch artık final konumunda sabit duruyor *)
+              otherStart := NewRangeStart[j];
+              otherEnd := NewRangeEnd[j];
+            ELSE
+              otherStart := CurrentRangeStart[j];
+              otherEnd := CurrentRangeEnd[j];
+            END_IF;
+
+            IF (NewRangeEnd[i] > otherStart) AND (NewRangeStart[i] < otherEnd) THEN
+              overlapFound := TRUE;
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+
+        (* --- drag-load / diğer sabit obstacle'lara karşı kontrol --- *)
+        IF NOT overlapFound THEN
+          FOR k := 1 TO 15 DO
+            IF ObstacleActive[k] THEN
+              IF (NewRangeEnd[i] > ObstacleStart[k]) AND (NewRangeStart[i] < ObstacleEnd[k]) THEN
+                overlapFound := TRUE;
+                EXIT;
+              END_IF;
+            END_IF;
+          END_FOR;
+        END_IF;
+
+        TargetBlocked[i] := overlapFound;
+
+        IF overlapFound THEN
+          MoveTypeCandidate[i] := 4; (* BLOCKED *)
+          BlockedCount := BlockedCount + 1;
+          BlockedCandidateIndex[BlockedCount] := i;
+        END_IF;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_CHECK_SWEEP;

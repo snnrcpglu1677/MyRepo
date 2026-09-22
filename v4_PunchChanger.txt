@@ -1,0 +1,30 @@
+(* ------------------------------------------------------------ *)
+(* Relocate threshold refinement:                                *)
+(* RelocateThreshold sadece drag-unload/drag-load punch'lara     *)
+(* göre hesaplandı. Ancak RelocateThreshold'un sağında,          *)
+(* relocate edilmeyen (hâlâ keep olarak duran) punch'lar olabilir.*)
+(* Böyle punch'lar varsa relocate edilen punch bunların üzerine   *)
+(* gönderilmemeli; bu yüzden eşik, bu punch'lar arasındaki en     *)
+(* büyük (en sağdaki) pozisyona göre güncellenmeli.               *)
+(* ------------------------------------------------------------ *)
+MaxKeepAboveThreshold := 0.0;
+FoundKeepAboveThreshold := FALSE;
+
+FOR a := 1 TO KeepCount DO
+  IF Retain_KeepPunchList[a,6] <> '' THEN
+    tmpPos := STRING_TO_LREAL(Retain_KeepPunchList[a,6]);
+
+    IF tmpPos > RelocateThreshold THEN
+      IF (NOT FoundKeepAboveThreshold) OR (tmpPos > MaxKeepAboveThreshold) THEN
+        MaxKeepAboveThreshold := tmpPos;
+        FoundKeepAboveThreshold := TRUE;
+      END_IF;
+    END_IF;
+  END_IF;
+END_FOR;
+
+IF FoundKeepAboveThreshold THEN
+  RelocateTrashold_Value := MaxKeepAboveThreshold;
+ELSE
+  RelocateTrashold_Value := RelocateThreshold;
+END_IF;

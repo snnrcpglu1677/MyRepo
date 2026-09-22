@@ -1,0 +1,672 @@
+FUNCTION_BLOCK Punch_Relocate
+VAR_INPUT
+  RelocateStartCmd   : BOOL;   (* State_Machine'den gelen başlat komutu *)
+  Reset              : BOOL;   (* SOFT reset: state/substate resetlemez, sadece requestleri keser *)
+  Abort_Cycle        : BOOL;   (* HARD abort: tüm FB içi state/substate/flagleri resetler *)
+  Automatic_Page     : BOOL;   (* TRUE: otomatik sayfa aktif, FALSE: otomatik dışı -> pause zorunlu *)
+END_VAR
+
+VAR_IN_OUT
+  General_Stop       : BOOL;
+  General_Start      : BOOL;   (* Enable/pause: FALSE iken pause, TRUE iken devam *)
+END_VAR
+
+VAR_OUTPUT
+  RelocateStartAck   : BOOL;   (* State_Machine'e ACK *)
+  RelocateBusy       : BOOL;   (* FB aktif çalışıyor *)
+  RelocateError      : BOOL;   (* hata flag *)
+  RelocateDone       : BOOL;   (* tüm relocate işlemleri bitti *)
+END_VAR
+
+VAR RETAIN
+  {attribute 'ac_persist':='PersistenceChannel'} Local_Shuttle_State    : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PRelocate_SH_SubStates  : INT := 0;
+
+  lastStartCmd            : BOOL := FALSE;
+  initiated               : BOOL := FALSE;
+
+  Current_PunchIndex      : INT := 0;
+  RelocateCount           : INT := 0;
+
+  (* Runtime punch state *)
+  RelocateActive          : ARRAY[1..15] OF BOOL;
+  RelocateDoneArr         : ARRAY[1..15] OF BOOL;
+
+  (* Source mapping *)
+  RelocateOldIndex        : ARRAY[1..15] OF INT;
+
+  (* Attributes *)
+  RelocateWidth           : ARRAY[1..15] OF LREAL;
+  RelocateOldZ            : ARRAY[1..15] OF LREAL;
+  RelocateCurrentZ        : ARRAY[1..15] OF LREAL;
+  RelocateTargetZ         : ARRAY[1..15] OF LREAL;
+  RelocateSafeZ           : ARRAY[1..15] OF LREAL;
+
+  RelocateTargetCenter    : ARRAY[1..15] OF LREAL;
+  RelocatePlacedStart     : ARRAY[1..15] OF LREAL;
+  RelocatePlacedEnd       : ARRAY[1..15] OF LREAL;
+
+  (* Motion helper flags *)
+  SH_DX_MoveRequested     : BOOL := FALSE;
+  SH_DX_Done              : BOOL := FALSE;
+  SH_DR_MoveRequested     : BOOL := FALSE;
+  SH_DR_Done              : BOOL := FALSE;
+  SH_Z_MoveRequested      : BOOL := FALSE;
+  SH_Z_Done               : BOOL := FALSE;
+
+  (* Clamp / pin helper *)
+  PinsReady               : BOOL := FALSE;
+  ClampReleased           : BOOL := FALSE;
+  ClampEngaged            : BOOL := FALSE;
+END_VAR
+
+VAR
+  risingStart             : BOOL;
+  AutoRunEnable           : BOOL;
+  i                       : INT;
+
+  tmpInt                  : INT;
+  tmpWidth                : LREAL;
+  tmpHalfWidth            : LREAL;
+  tmpCurrentPos           : LREAL;
+  tmpDrawerNo             : INT;
+  CommitOldIndex          : INT;
+
+  PosEps                  : LREAL := 0.01;
+  KeepPosEps              : LREAL := 0.01;
+
+  ClampOff_Timer          : TON;
+  ClampOn_Timer           : TON;
+
+  ZOffset                 : LREAL;
+  TargetCenter            : LREAL;
+  m                       : INT;
+END_VAR
+
+(* ------------------------------------------------------------ *)
+(* Derived control *)
+(* ------------------------------------------------------------ *)
+AutoRunEnable := Automatic_Page AND General_Start AND (NOT General_Stop);
+risingStart := RelocateStartCmd AND NOT lastStartCmd;
+ZOffset := REAL_TO_LREAL(Retain_ZParameters[19]);
+
+(* ------------------------------------------------------------ *)
+(* HARD ABORT *)
+(* ------------------------------------------------------------ *)
+IF Abort_Cycle THEN
+  RelocateStartAck := FALSE;
+  RelocateBusy := FALSE;
+  RelocateDone := FALSE;
+  RelocateError := FALSE;
+
+  Local_Shuttle_State := Shuttle_States.SH_IDLE;
+  PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_IDLE;
+
+  initiated := FALSE;
+  Current_PunchIndex := 0;
+  RelocateCount := 0;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  PinsReady := FALSE;
+  ClampReleased := FALSE;
+  ClampEngaged := FALSE;
+
+  FOR i := 1 TO 15 DO
+    RelocateActive[i] := FALSE;
+    RelocateDoneArr[i] := FALSE;
+    RelocateOldIndex[i] := 0;
+
+    RelocateWidth[i] := 0.0;
+    RelocateOldZ[i] := 0.0;
+    RelocateCurrentZ[i] := 0.0;
+    RelocateTargetZ[i] := 0.0;
+    RelocateSafeZ[i] := 0.0;
+    RelocateTargetCenter[i] := 0.0;
+    RelocatePlacedStart[i] := 0.0;
+    RelocatePlacedEnd[i] := 0.0;
+  END_FOR;
+
+  RETURN;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* SOFT RESET *)
+(* ------------------------------------------------------------ *)
+IF Reset THEN
+  RelocateStartAck := FALSE;
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* START *)
+(* ------------------------------------------------------------ *)
+IF risingStart AND (NOT initiated) THEN
+  RelocateStartAck := TRUE;
+  RelocateBusy := TRUE;
+  RelocateDone := FALSE;
+  RelocateError := FALSE;
+
+  initiated := TRUE;
+  Current_PunchIndex := 1;
+  RelocateCount := 0;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  PinsReady := FALSE;
+  ClampReleased := FALSE;
+  ClampEngaged := FALSE;
+
+  FOR i := 1 TO 15 DO
+    RelocateActive[i] := FALSE;
+    RelocateDoneArr[i] := FALSE;
+    RelocateOldIndex[i] := 0;
+
+    RelocateWidth[i] := 0.0;
+    RelocateOldZ[i] := 0.0;
+    RelocateCurrentZ[i] := 0.0;
+    RelocateTargetZ[i] := 0.0;
+    RelocateSafeZ[i] := 0.0;
+    RelocateTargetCenter[i] := 0.0;
+    RelocatePlacedStart[i] := 0.0;
+    RelocatePlacedEnd[i] := 0.0;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    IF Retain_RelocatePunchList[i,3] <> '' THEN
+      RelocateCount := RelocateCount + 1;
+      RelocateActive[i] := TRUE;
+
+      IF Retain_RelocatePunchList[i,12] <> '' THEN
+        RelocateOldIndex[i] := STRING_TO_INT(Retain_RelocatePunchList[i,12]);
+      ELSE
+        RelocateOldIndex[i] := 0;
+      END_IF;
+
+      IF Retain_RelocatePunchList[i,7] <> '' THEN
+        RelocateWidth[i] := STRING_TO_LREAL(Retain_RelocatePunchList[i,7]);
+      ELSE
+        RelocateWidth[i] := 0.0;
+      END_IF;
+
+      IF Retain_RelocatePunchList[i,6] <> '' THEN
+        RelocateCurrentZ[i] := STRING_TO_LREAL(Retain_RelocatePunchList[i,6]) + ZOffset;
+      ELSE
+        RelocateCurrentZ[i] := ZOffset;
+      END_IF;
+
+      RelocateOldZ[i] := RelocateCurrentZ[i];
+    END_IF;
+  END_FOR;
+
+  IF RelocateCount = 0 THEN
+    RelocateBusy := FALSE;
+    RelocateDone := TRUE;
+    RelocateStartAck := FALSE;
+    initiated := FALSE;
+    Local_Shuttle_State := Shuttle_States.SH_IDLE;
+    PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_IDLE;
+  ELSE
+    Local_Shuttle_State := Shuttle_States.PRG_Proccesing;
+    PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_INIT_START;
+  END_IF;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* PAUSE behaviour *)
+(* ------------------------------------------------------------ *)
+IF initiated AND (NOT AutoRunEnable) THEN
+  lastStartCmd := RelocateStartCmd;
+  RETURN;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* MAIN STATE MACHINE *)
+(* ------------------------------------------------------------ *)
+IF initiated THEN
+
+  CASE Local_Shuttle_State OF
+
+    Shuttle_States.PRG_Proccesing:
+
+      CASE PRelocate_SH_SubStates OF
+
+        PunchRelocate_SH_SubState.PRSH_IDLE:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_INIT_START;
+
+        PunchRelocate_SH_SubState.PRSH_INIT_START:
+          IF (Current_PunchIndex >= 1) AND (Current_PunchIndex <= RelocateCount) THEN
+            IF Retain_RelocatePunchList[Current_PunchIndex,3] <> '' THEN
+              PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_CHECK_LIST_EMPTY;
+            ELSE
+              PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_COMMIT_NEXT_INDEX;
+            END_IF;
+          ELSE
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_FINISHED;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_CHECK_LIST_EMPTY:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PREP_CURRENT_INDEX;
+
+        PunchRelocate_SH_SubState.PRSH_PREP_CURRENT_INDEX:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ANALYZE_LOAD_SOURCE;
+
+        PunchRelocate_SH_SubState.PRSH_ANALYZE_LOAD_SOURCE:
+          IF Retain_RelocatePunchList[Current_PunchIndex,3] <> '' THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ANALYZE_DRAWER_NO;
+          ELSE
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_ANALYZE_DRAWER_NO:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ANALYZE_PICK_Z;
+
+        PunchRelocate_SH_SubState.PRSH_ANALYZE_PICK_Z:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ANALYZE_SAFE_POS;
+
+        PunchRelocate_SH_SubState.PRSH_ANALYZE_SAFE_POS:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ANALYZE_NEXT_SAFE_POS;
+
+        PunchRelocate_SH_SubState.PRSH_ANALYZE_NEXT_SAFE_POS:
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_CHECK_INSIDE;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_CHECK_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_CHECK_INSIDE;
+          ELSE
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_MOVE_INSIDE_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_MOVE_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_WAIT_INSIDE;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_WAIT_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_CHECK_INSIDE;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_CHECK_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_SAFE_REQ;
+          ELSE
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_MOVE_INSIDE_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_MOVE_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_WAIT_INSIDE;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_WAIT_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_SAFE_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DX_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_SAFE_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_DX_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_PICK_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DR_PICK_REQ:
+          tmpDrawerNo := 0;
+          IF Retain_RelocatePunchList[Current_PunchIndex,10] <> '' THEN
+            tmpDrawerNo := STRING_TO_INT(Retain_RelocatePunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF tmpDrawerNo <> 0 THEN
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam6[tmpDrawerNo]);
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_PICK_WAIT;
+          ELSE
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DR_PICK_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_PICK_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_Z_PICK_REQ:
+          tmpCurrentPos := 0.0;
+          IF Retain_RelocatePunchList[Current_PunchIndex,6] <> '' THEN
+            tmpCurrentPos := STRING_TO_LREAL(Retain_RelocatePunchList[Current_PunchIndex,6]) + ZOffset;
+          END_IF;
+
+          arAxes[EN_Axes.ATC_Z].TargetPos := tmpCurrentPos;
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_PICK_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_Z_PICK_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_PICK_ALIGN_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DX_PICK_ALIGN_REQ:
+          tmpDrawerNo := 0;
+          IF Retain_RelocatePunchList[Current_PunchIndex,10] <> '' THEN
+            tmpDrawerNo := STRING_TO_INT(Retain_RelocatePunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF tmpDrawerNo <> 0 THEN
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_PICK_ALIGN_WAIT;
+          ELSE
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DX_PICK_ALIGN_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_OUT_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_OUT_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := TRUE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_OUT_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_OUT_WAIT:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_OUT_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_OUT_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_OUT_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_OUT_WAIT:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_CLAMP_OFF_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_CLAMP_OFF_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_CLAMP_OFF_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_CLAMP_OFF_WAIT:
+          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_WITHDRAW_SLOW_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DR_WITHDRAW_SLOW_REQ:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos - TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_WITHDRAW_SLOW_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_DR_WITHDRAW_SLOW_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_REQ:
+          arAxes[EN_Axes.ATC_Z].TargetPos := RelocateTargetZ[Current_PunchIndex];
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_PLACE_ALIGN_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DX_PLACE_ALIGN_REQ:
+          tmpDrawerNo := 0;
+          IF Retain_RelocatePunchList[Current_PunchIndex,10] <> '' THEN
+            tmpDrawerNo := STRING_TO_INT(Retain_RelocatePunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF tmpDrawerNo <> 0 THEN
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DX_PLACE_ALIGN_WAIT;
+          ELSE
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DX_PLACE_ALIGN_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_INSERT_SLOW_REQ;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_DR_INSERT_SLOW_REQ:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos + TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_DR_INSERT_SLOW_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_DR_INSERT_SLOW_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_CLAMP_ON_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_CLAMP_ON_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_CLAMP_ON_WAIT:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_IN_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN2_IN_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_PIN2_IN_WAIT:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_IN_CMD;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_PIN1_IN_WAIT;
+
+        PunchRelocate_SH_SubState.PRSH_PIN1_IN_WAIT:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_PFIELDS;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_PFIELDS:
+          CommitOldIndex := 0;
+
+          IF Retain_RelocatePunchList[Current_PunchIndex,12] <> '' THEN
+            CommitOldIndex :=
+              STRING_TO_INT(
+                Retain_RelocatePunchList[Current_PunchIndex,12]
+              );
+          END_IF;
+
+          (* ---------------------------------------------------------- *)
+          (* Validate original PFields_Old index                       *)
+          (* ---------------------------------------------------------- *)
+          IF (CommitOldIndex >= 1) AND (CommitOldIndex <= 15) THEN
+
+            (* -------------------------------------------------------- *)
+            (* Update live/current punch data in PFields_Old            *)
+            (* -------------------------------------------------------- *)
+            PFields_Old[CommitOldIndex,5] :=
+              Retain_RelocatePunchList[Current_PunchIndex,5];
+
+            PFields_Old[CommitOldIndex,6] :=
+              LREAL_TO_STRING(
+                RelocateTargetZ[Current_PunchIndex] - ZOffset
+              );
+
+            PFields_Old[CommitOldIndex,10] :=
+              Retain_RelocatePunchList[Current_PunchIndex,10];
+
+            PFields_Old[CommitOldIndex,11] :=
+              Retain_RelocatePunchList[Current_PunchIndex,11];
+
+            PFields_Old[CommitOldIndex,12] :=
+              Retain_RelocatePunchList[Current_PunchIndex,12];
+
+            (* -------------------------------------------------------- *)
+            (* Synchronize current data in Retain_KeepPunchList         *)
+            (* -------------------------------------------------------- *)
+            FOR m := 1 TO 15 DO
+
+              IF Retain_KeepPunchList[m,12] =
+                 Retain_RelocatePunchList[Current_PunchIndex,12] THEN
+
+                Retain_KeepPunchList[m,5] :=
+                  Retain_RelocatePunchList[Current_PunchIndex,5];
+
+                Retain_KeepPunchList[m,6] :=
+                  LREAL_TO_STRING(
+                    RelocateTargetZ[Current_PunchIndex] - ZOffset
+                  );
+
+                Retain_KeepPunchList[m,10] :=
+                  Retain_RelocatePunchList[Current_PunchIndex,10];
+
+                Retain_KeepPunchList[m,11] :=
+                  Retain_RelocatePunchList[Current_PunchIndex,11];
+
+                Retain_KeepPunchList[m,12] :=
+                  Retain_RelocatePunchList[Current_PunchIndex,12];
+
+                EXIT;
+              END_IF;
+
+            END_FOR;
+
+            PRelocate_SH_SubStates :=
+              PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_RETAIN;
+
+          ELSE
+            (* Geçersiz orijinal index -> hata state'ine geç *)
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates :=
+              PunchRelocate_SH_SubState.PRSH_ERROR;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_RETAIN:
+          IF (Current_PunchIndex >= 1) AND (Current_PunchIndex <= 15) THEN
+            RelocateDoneArr[Current_PunchIndex] := TRUE;
+            RelocateActive[Current_PunchIndex] := FALSE;
+          END_IF;
+
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_COMMIT_NEXT_INDEX;
+
+        PunchRelocate_SH_SubState.PRSH_COMMIT_NEXT_INDEX:
+          Current_PunchIndex := Current_PunchIndex + 1;
+          IF Current_PunchIndex > RelocateCount THEN
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_FINISHED;
+          ELSE
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_INIT_START;
+          END_IF;
+
+        PunchRelocate_SH_SubState.PRSH_FINISHED:
+          RelocateBusy := FALSE;
+          RelocateDone := TRUE;
+          RelocateStartAck := FALSE;
+          initiated := FALSE;
+          Local_Shuttle_State := Shuttle_States.SH_IDLE;
+
+        PunchRelocate_SH_SubState.PRSH_ERROR:
+          RelocateBusy := FALSE;
+          RelocateDone := FALSE;
+          RelocateStartAck := FALSE;
+          RelocateError := TRUE;
+          initiated := FALSE;
+
+        PunchRelocate_SH_SubState.PRSH_ABORT:
+          RelocateBusy := FALSE;
+          RelocateDone := FALSE;
+          RelocateStartAck := FALSE;
+          initiated := FALSE;
+
+        ELSE
+          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+      END_CASE;
+
+    ELSE
+      ;
+  END_CASE;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* Edge memory update *)
+(* ------------------------------------------------------------ *)
+lastStartCmd := RelocateStartCmd;

@@ -1,0 +1,870 @@
+FUNCTION_BLOCK PunchChanger
+
+VAR_INPUT
+	Trigger : BOOL ;
+	Unload: BOOL;
+END_VAR
+
+VAR_OUTPUT RETAIN
+  ValidityFlag   : BOOL;
+  PerIndexStatus : ARRAY[1..15] OF PIndexStatus;
+  PackageState   : PPackageState;
+  NextActionHint : PNextActionHint;
+
+  numSame  : INT;
+  numDiff  : INT;
+  newCount : INT;
+  oldCount : INT;
+  
+  ErrorText : STRING(200);
+  Error : BOOL; 
+  Busy  : BOOL;
+  Done  : BOOL;
+END_VAR
+
+VAR RETAIN
+  i : INT;
+  j : INT;
+  k : INT;
+  assigned:BOOL;
+  foundIndex : INT;
+  
+  usedSlot :ARRAY [1..16, 1..15] OF BOOL;
+  OldAssignedDrawer:ARRAY[1..15] OF INT;
+  OldAssignedSlot:ARRAY[1..15] OF INT;
+  
+  NewAssignedDrawer:ARRAY[1..15] OF INT;
+  NewAssignedSlot   : ARRAY[1..15] OF INT;
+  origNewIdx:INT;
+  NewName : STRING(100);
+  OldName : STRING(100);
+  NewLen : STRING(100);
+  NewLenReal : REAL;
+  NewHorn : STRING(100);
+  NewHornReal : REAL;
+  OldLen : STRING(100);
+  OldLenReal : REAL;
+  OldHorn : STRING(100);
+  NewRot : STRING(100);
+  OldRot : STRING(100);
+
+  eps : REAL := 0.001;
+
+  foundLengthMatch : BOOL;
+  hasLengthValue : BOOL;
+
+  KeepList : ARRAY[1..15] OF BOOL;
+  ReplaceList : ARRAY[1..15] OF BOOL;
+  LoadOnlyList : ARRAY[1..15] OF BOOL;
+  UnloadOnlyList : ARRAY[1..15] OF BOOL;
+  OldMatched : ARRAY[1..15] OF BOOL;
+  NewMatchedToOld : ARRAY[1..15] OF INT;
+
+  UnloadTempCount : INT;
+  UnloadTempOrigIndex : ARRAY[1..15] OF INT;
+  UnloadTempDrawerIdx : ARRAY[1..15] OF INT;
+  UnloadTempOrder : ARRAY[1..15] OF INT;
+
+  LoadTempCount : INT;
+  LoadTempOrigIndex : ARRAY[1..15] OF INT;
+  LoadTempDrawerIdx : ARRAY[1..15] OF INT;
+  LoadTempOrder : ARRAY[1..15] OF INT;
+
+  KeepTempCount : INT;
+  KeepTempOrigIndex : ARRAY[1..15] OF INT;
+  KeepTempDrawerIdx : ARRAY[1..15] OF INT;
+  KeepTempOrder : ARRAY[1..15] OF INT;
+
+  a : INT;
+  b : INT;
+  minIdx : INT;
+  tmpInt : INT;
+
+  OldAvailCount : INT;
+  OldAvailIndex : ARRAY[1..15] OF INT;
+
+  c : INT;
+  d : INT;
+  e : INT;
+  m : INT;
+  UnloadCount: INT;
+  LoadCount:INT;
+  KeepCount :INT;
+  lenStr : STRING(100);
+  posStr : STRING(100);
+  hornStr : STRING(100);
+  lenRealLocal : REAL;
+  hornRealLocal : REAL;
+
+  neededCount : INT;
+  availCount : INT;
+  skipTriple : BOOL := FALSE;
+  uniqCount : INT;
+  uniqName : ARRAY[1..15] OF STRING(100);
+  uniqLen  : ARRAY[1..15] OF STRING(100);
+  uniqHorn : ARRAY[1..15] OF STRING(100);
+  uniqNeeded : ARRAY[1..15] OF INT;
+
+  (* Drag/Relocate helpers *)
+  DragUnloadCount : INT;
+  DragLoadCount : INT;
+  RightmostDragUnloadPos : LREAL;
+  RightmostDragLoadPos : LREAL;
+  RelocateThreshold : LREAL;
+  DragFlag : STRING(10);
+  RelocateCount : INT;
+  RelocateIdx : INT;
+END_VAR
+
+VAR
+	eTmp : INT;
+	dTmp : INT;
+	tmpPos : LREAL;
+	hasRelocateOverlap : BOOL;
+END_VAR
+
+(* Main execution: run on rising edge of Trigger or Unload *)
+IF Unload THEN
+  Busy := TRUE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+  ValidityFlag := TRUE;
+
+  numSame := 0;
+  numDiff := 0;
+  newCount := 0;
+  oldCount := 0;
+
+  FOR i := 1 TO 15 DO
+    KeepList[i] := FALSE;
+    ReplaceList[i] := FALSE;
+    LoadOnlyList[i] := FALSE;
+    UnloadOnlyList[i] := FALSE;
+    PerIndexStatus[i] := PIndexStatus.SAME;
+    OldMatched[i] := FALSE;
+    NewMatchedToOld[i] := 0;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_UnloadPunchList[i,j] := '';
+      Retain_ATCUnloadPunchList[i,j] := '';
+      Retain_LoadPunchList[i,j] := '';
+      Retain_ATCLoadPunchList[i,j] := '';
+      Retain_KeepPunchList[i,j] := '';
+      Retain_KeepPunchListNew[i,j] := '';
+      Retain_RelocatePunchList[i,j] := '';
+    END_FOR;
+  END_FOR;
+
+  UnloadTempCount := 0;
+  FOR i := 1 TO 15 DO
+    IF PFields_Old[i,3] <> '' THEN
+      oldCount := oldCount + 1;
+      UnloadOnlyList[i] := TRUE;
+
+      foundIndex := 0;
+      FOR k := 1 TO 16 DO
+        IF pDrawerName[k] = PFields_Old[i,3] THEN
+          foundIndex := k;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF foundIndex <> 0 THEN
+        UnloadTempCount := UnloadTempCount + 1;
+        UnloadTempOrigIndex[UnloadTempCount] := i;
+        UnloadTempDrawerIdx[UnloadTempCount] := foundIndex;
+        UnloadTempOrder[UnloadTempCount] := UnloadTempCount;
+      END_IF;
+
+      PerIndexStatus[i] := PIndexStatus.DIFF;
+    ELSE
+      PerIndexStatus[i] := PIndexStatus.SAME;
+    END_IF;
+  END_FOR;
+
+  numSame := 0;
+  numDiff := oldCount;
+  newCount := 0;
+
+  FOR a := 1 TO UnloadTempCount - 1 DO
+    minIdx := a;
+    FOR b := a + 1 TO UnloadTempCount DO
+      IF UnloadTempDrawerIdx[b] < UnloadTempDrawerIdx[minIdx] THEN
+        minIdx := b;
+      ELSIF (UnloadTempDrawerIdx[b] = UnloadTempDrawerIdx[minIdx]) AND (UnloadTempOrder[b] < UnloadTempOrder[minIdx]) THEN
+        minIdx := b;
+      END_IF;
+    END_FOR;
+
+    IF minIdx <> a THEN
+      tmpInt := UnloadTempOrigIndex[a];
+      UnloadTempOrigIndex[a] := UnloadTempOrigIndex[minIdx];
+      UnloadTempOrigIndex[minIdx] := tmpInt;
+
+      tmpInt := UnloadTempDrawerIdx[a];
+      UnloadTempDrawerIdx[a] := UnloadTempDrawerIdx[minIdx];
+      UnloadTempDrawerIdx[minIdx] := tmpInt;
+
+      tmpInt := UnloadTempOrder[a];
+      UnloadTempOrder[a] := UnloadTempOrder[minIdx];
+      UnloadTempOrder[minIdx] := tmpInt;
+    END_IF;
+  END_FOR;
+
+  UnloadCount := 0;
+  FOR a := 1 TO UnloadTempCount DO
+    UnloadCount := UnloadCount + 1;
+    i := UnloadTempOrigIndex[a];
+    FOR j := 1 TO 12 DO
+      Retain_UnloadPunchList[UnloadCount, j] := PFields_Old[i, j];
+    END_FOR;
+    Retain_UnloadPunchList[UnloadCount, 12] := INT_TO_STRING(i);
+  END_FOR;
+
+  FOR c := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_ATCUnloadPunchList[c, j] := '';
+    END_FOR;
+  END_FOR;
+
+  FOR c := 1 TO UnloadCount DO
+    tmpInt := UnloadTempOrigIndex[c];
+    IF (tmpInt >= 1) AND (tmpInt <= 15) AND (PFields_Old[tmpInt,10] <> '') AND (PFields_Old[tmpInt,11] <> '') THEN
+      e := STRING_TO_INT(PFields_Old[tmpInt,10]);
+      d := STRING_TO_INT(PFields_Old[tmpInt,11]);
+      IF (e >= 1) AND (e <= 16) AND (d >= 1) AND (d <= 15) THEN
+        Retain_ATCUnloadPunchList[c,1] := pDrawerName[e];
+        Retain_ATCUnloadPunchList[c,2] := PFields_Old[tmpInt,10];
+        Retain_ATCUnloadPunchList[c,3] := PFields_Old[tmpInt,11];
+        Retain_ATCUnloadPunchList[c,4] := REAL_TO_STRING(PunchLength[e,d]);
+        Retain_ATCUnloadPunchList[c,5] := REAL_TO_STRING(PunchPosition[e,d]);
+        Retain_ATCUnloadPunchList[c,6] := REAL_TO_STRING(PunchHorn[e,d]);
+        Retain_ATCUnloadPunchList[c,12] := INT_TO_STRING(tmpInt);
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  PackageState := PPackageState.PARTIAL_CHANGE;
+  NextActionHint := PNextActionHint.NO_ACTION;
+  ValidityFlag := TRUE;
+
+  Busy := FALSE;
+  Done := TRUE;
+
+ELSIF Trigger THEN
+  Busy := TRUE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+  ValidityFlag := TRUE;
+
+  numSame := 0;
+  numDiff := 0;
+  newCount := 0;
+  oldCount := 0;
+
+  FOR i := 1 TO 15 DO
+    KeepList[i] := FALSE;
+    ReplaceList[i] := FALSE;
+    LoadOnlyList[i] := FALSE;
+    UnloadOnlyList[i] := FALSE;
+    PerIndexStatus[i] := PIndexStatus.SAME;
+    OldMatched[i] := FALSE;
+    NewMatchedToOld[i] := 0;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_UnloadPunchList[i,j] := '';
+      Retain_ATCUnloadPunchList[i,j] := '';
+      Retain_LoadPunchList[i,j] := '';
+      Retain_ATCLoadPunchList[i,j] := '';
+      Retain_KeepPunchList[i,j] := '';
+      Retain_KeepPunchListNew[i,j] := '';
+      Retain_RelocatePunchList[i,j] := '';
+    END_FOR;
+  END_FOR;
+
+  (* STEP 1: validate new program *)
+  FOR i := 1 TO 15 DO
+    NewName := PFields[i,3];
+    IF NewName <> '' THEN
+      newCount := newCount + 1;
+      NewLen := PFields[i,7];
+
+      foundIndex := 0;
+      FOR j := 1 TO 16 DO
+        IF pDrawerName[j] = NewName THEN
+          foundIndex := j;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF foundIndex = 0 THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: missing ATC tool name: ', NewName);
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+
+      IF NewLen = '' THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: missing length for tool: ', NewName);
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+
+      foundLengthMatch := FALSE;
+      hasLengthValue := FALSE;
+      NewLenReal := 0.0;
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+        hasLengthValue := TRUE;
+      END_IF;
+
+      IF hasLengthValue THEN
+        FOR j := 1 TO 16 DO
+          IF pDrawerName[j] = NewName THEN
+            FOR k := 1 TO 15 DO
+              IF ABS(PunchLength[j, k] - NewLenReal) <= eps THEN
+                foundLengthMatch := TRUE;
+                EXIT;
+              END_IF;
+            END_FOR;
+            IF foundLengthMatch THEN
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+
+      IF NOT foundLengthMatch THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: requested length NOT found FOR tool: ', NewName);
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  (* STEP 2: keep matching *)
+  OldAvailCount := 0;
+  FOR j := 1 TO 15 DO
+    OldName := PFields_Old[j,3];
+    IF OldName <> '' THEN
+      OldAvailCount := OldAvailCount + 1;
+      OldAvailIndex[OldAvailCount] := j;
+      OldMatched[j] := FALSE;
+      oldCount := oldCount + 1;
+    END_IF;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    NewName := PFields[i,3];
+    IF NewName <> '' THEN
+      NewLen := PFields[i,7];
+      NewHorn := PFields[i,9];
+      NewRot := PFields[i,8];
+      NewLenReal := 0.0;
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+      END_IF;
+
+      NewMatchedToOld[i] := 0;
+      a := 1;
+      WHILE (a <= OldAvailCount) AND (NewMatchedToOld[i] = 0) DO
+        j := OldAvailIndex[a];
+        OldName := PFields_Old[j,3];
+        IF OldName <> '' THEN
+          OldLen := PFields_Old[j,7];
+          OldHorn := PFields_Old[j,9];
+          OldRot := PFields_Old[j,8];
+          OldLenReal := 0.0;
+          IF OldLen <> '' THEN
+            OldLenReal := STRING_TO_REAL(OldLen);
+          END_IF;
+
+          IF (NewName = OldName) AND (NewHorn = OldHorn) AND (NewRot = OldRot) AND (ABS(NewLenReal - OldLenReal) <= eps) THEN
+            OldMatched[j] := TRUE;
+            KeepList[j] := TRUE;
+            NewMatchedToOld[i] := j;
+            FOR b := a TO OldAvailCount - 1 DO
+              OldAvailIndex[b] := OldAvailIndex[b + 1];
+            END_FOR;
+            OldAvailCount := OldAvailCount - 1;
+          ELSE
+            a := a + 1;
+          END_IF;
+        ELSE
+          a := a + 1;
+        END_IF;
+      END_WHILE;
+
+      IF NewMatchedToOld[i] = 0 THEN
+        LoadOnlyList[i] := TRUE;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  FOR a := 1 TO OldAvailCount DO
+    j := OldAvailIndex[a];
+    IF PFields_Old[j,3] <> '' THEN
+      UnloadOnlyList[j] := TRUE;
+    END_IF;
+  END_FOR;
+
+  (* STEP 3: validate load-only punches *)
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN
+      NewName := PFields[i,3];
+      NewLen := PFields[i,7];
+      foundLengthMatch := FALSE;
+      hasLengthValue := FALSE;
+      NewLenReal := 0.0;
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+        hasLengthValue := TRUE;
+      END_IF;
+
+      IF hasLengthValue THEN
+        FOR j := 1 TO 16 DO
+          IF pDrawerName[j] = NewName THEN
+            FOR k := 1 TO 15 DO
+              IF (NOT PunchUsed[j,k]) AND (ABS(PunchLength[j, k] - NewLenReal) <= eps) THEN
+                foundLengthMatch := TRUE;
+                EXIT;
+              END_IF;
+            END_FOR;
+            IF foundLengthMatch THEN
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+
+      IF NOT foundLengthMatch THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: requested load punch length NOT available in free ATC punches FOR tool: ', NewName);
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  (* STEP 4: multiplicity check for load-only *)
+  uniqCount := 0;
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN
+      foundIndex := 0;
+      FOR a := 1 TO uniqCount DO
+        IF (uniqName[a] = PFields[i,3]) AND (uniqLen[a] = PFields[i,7]) AND (uniqHorn[a] = PFields[i,9]) THEN
+          foundIndex := a;
+          EXIT;
+        END_IF;
+      END_FOR;
+      IF foundIndex = 0 THEN
+        uniqCount := uniqCount + 1;
+        uniqName[uniqCount] := PFields[i,3];
+        uniqLen[uniqCount] := PFields[i,7];
+        uniqHorn[uniqCount] := PFields[i,9];
+        uniqNeeded[uniqCount] := 1;
+      ELSE
+        uniqNeeded[foundIndex] := uniqNeeded[foundIndex] + 1;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  FOR a := 1 TO uniqCount DO
+    NewName := uniqName[a];
+    NewLen := uniqLen[a];
+    NewHorn := uniqHorn[a];
+
+    availCount := 0;
+    IF (NewLen <> '') AND (NewHorn <> '') THEN
+      NewLenReal := STRING_TO_REAL(NewLen);
+      NewHornReal := STRING_TO_REAL(NewHorn);
+      FOR e := 1 TO 16 DO
+        IF pDrawerName[e] = NewName THEN
+          FOR d := 1 TO 15 DO
+            IF (NOT PunchUsed[e,d]) AND
+               (ABS(PunchLength[e,d] - NewLenReal) <= eps) AND
+               (ABS(PunchHorn[e,d] - NewHornReal) <= eps) THEN
+              availCount := availCount + 1;
+            END_IF;
+          END_FOR;
+        END_IF;
+      END_FOR;
+    END_IF;
+
+    IF availCount < uniqNeeded[a] THEN
+      ValidityFlag := FALSE;
+      PackageState := PPackageState.INVALID;
+      NextActionHint := PNextActionHint.INVALID_ABORT;
+      Error := TRUE;
+      ErrorText := CONCAT('INVALID: insufficient FREE ATC slots for load tool ', NewName);
+      Busy := FALSE;
+      Done := TRUE;
+      RETURN;
+    END_IF;
+  END_FOR;
+
+  (* SUMMARY *)
+  numSame := 0;
+  numDiff := 0;
+  FOR j := 1 TO 15 DO
+    IF KeepList[j] THEN numSame := numSame + 1; END_IF;
+    IF UnloadOnlyList[j] THEN numDiff := numDiff + 1; END_IF;
+  END_FOR;
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN numDiff := numDiff + 1; END_IF;
+  END_FOR;
+
+  IF NOT ValidityFlag THEN
+    PackageState := PPackageState.INVALID;
+    NextActionHint := PNextActionHint.INVALID_ABORT;
+  ELSE
+    PackageState := PPackageState.PARTIAL_CHANGE;
+    NextActionHint := PNextActionHint.NO_ACTION;
+  END_IF;
+
+  ValidityFlag := NOT Error;
+
+  IF PackageState <> PPackageState.INVALID THEN
+    FOR i := 1 TO 15 DO
+      FOR j := 1 TO 12 DO
+        Retain_UnloadPunchList[i,j] := '';
+        Retain_ATCUnloadPunchList[i,j] := '';
+        Retain_LoadPunchList[i,j] := '';
+        Retain_ATCLoadPunchList[i,j] := '';
+        Retain_KeepPunchList[i,j] := '';
+        Retain_KeepPunchListNew[i,j] := '';
+        Retain_RelocatePunchList[i,j] := '';
+      END_FOR;
+    END_FOR;
+
+    (* pack unload *)
+    UnloadTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF UnloadOnlyList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 16 DO
+          IF pDrawerName[k] = PFields_Old[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          UnloadTempCount := UnloadTempCount + 1;
+          UnloadTempOrigIndex[UnloadTempCount] := i;
+          UnloadTempDrawerIdx[UnloadTempCount] := foundIndex;
+          UnloadTempOrder[UnloadTempCount] := UnloadTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO UnloadTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO UnloadTempCount DO
+        IF UnloadTempDrawerIdx[b] < UnloadTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (UnloadTempDrawerIdx[b] = UnloadTempDrawerIdx[minIdx]) AND (UnloadTempOrder[b] < UnloadTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := UnloadTempOrigIndex[a];
+        UnloadTempOrigIndex[a] := UnloadTempOrigIndex[minIdx];
+        UnloadTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := UnloadTempDrawerIdx[a];
+        UnloadTempDrawerIdx[a] := UnloadTempDrawerIdx[minIdx];
+        UnloadTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := UnloadTempOrder[a];
+        UnloadTempOrder[a] := UnloadTempOrder[minIdx];
+        UnloadTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    UnloadCount := 0;
+    FOR a := 1 TO UnloadTempCount DO
+      UnloadCount := UnloadCount + 1;
+      i := UnloadTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_UnloadPunchList[UnloadCount, j] := PFields_Old[i, j];
+      END_FOR;
+      Retain_UnloadPunchList[UnloadCount, 12] := INT_TO_STRING(i);
+    END_FOR;
+
+    (* pack load *)
+    LoadTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF LoadOnlyList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 16 DO
+          IF pDrawerName[k] = PFields[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          LoadTempCount := LoadTempCount + 1;
+          LoadTempOrigIndex[LoadTempCount] := i;
+          LoadTempDrawerIdx[LoadTempCount] := foundIndex;
+          LoadTempOrder[LoadTempCount] := LoadTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO LoadTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO LoadTempCount DO
+        IF LoadTempDrawerIdx[b] < LoadTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (LoadTempDrawerIdx[b] = LoadTempDrawerIdx[minIdx]) AND (LoadTempOrder[b] < LoadTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := LoadTempOrigIndex[a];
+        LoadTempOrigIndex[a] := LoadTempOrigIndex[minIdx];
+        LoadTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := LoadTempDrawerIdx[a];
+        LoadTempDrawerIdx[a] := LoadTempDrawerIdx[minIdx];
+        LoadTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := LoadTempOrder[a];
+        LoadTempOrder[a] := LoadTempOrder[minIdx];
+        LoadTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    LoadCount := 0;
+    FOR a := 1 TO LoadTempCount DO
+      LoadCount := LoadCount + 1;
+      i := LoadTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_LoadPunchList[LoadCount, j] := PFields[i, j];
+      END_FOR;
+      Retain_LoadPunchList[LoadCount, 12] := INT_TO_STRING(i);
+    END_FOR;
+
+    (* ATC load mapping *)
+    FOR c := 1 TO 15 DO
+      FOR j := 1 TO 12 DO
+        Retain_ATCLoadPunchList[c, j] := '';
+      END_FOR;
+    END_FOR;
+
+    FOR e := 1 TO 16 DO
+      FOR d := 1 TO 15 DO
+        usedSlot[e,d] := FALSE;
+      END_FOR;
+    END_FOR;
+
+    FOR i := 1 TO 15 DO
+      NewAssignedDrawer[i] := 0;
+      NewAssignedSlot[i] := 0;
+    END_FOR;
+
+    FOR c := 1 TO LoadCount DO
+      origNewIdx := LoadTempOrigIndex[c];
+      NewName := Retain_LoadPunchList[c,3];
+      lenStr := Retain_LoadPunchList[c,7];
+      hornStr := Retain_LoadPunchList[c,9];
+      foundIndex := 0;
+
+      IF (NewName <> '') AND (lenStr <> '') AND (hornStr <> '') THEN
+        lenRealLocal := STRING_TO_REAL(lenStr);
+        hornRealLocal := STRING_TO_REAL(hornStr);
+        FOR e := 1 TO 16 DO
+          IF pDrawerName[e] = NewName THEN
+            FOR d := 1 TO 15 DO
+              IF (NOT usedSlot[e,d]) AND (NOT PunchUsed[e,d]) THEN
+                IF (ABS(PunchLength[e,d] - lenRealLocal) <= eps) AND
+                   (ABS(PunchHorn[e,d] - hornRealLocal) <= eps) THEN
+
+                  usedSlot[e,d] := TRUE;
+                  foundIndex := e;
+                  Retain_ATCLoadPunchList[c,1] := pDrawerName[e];
+                  Retain_ATCLoadPunchList[c,2] := PFields[i,2];
+                  Retain_ATCLoadPunchList[c,3] := INT_TO_STRING(d);
+                  Retain_ATCLoadPunchList[c,4] := REAL_TO_STRING(PunchLength[e,d]);
+                  Retain_ATCLoadPunchList[c,5] := REAL_TO_STRING(PunchPosition[e,d]);
+                  Retain_ATCLoadPunchList[c,6] := REAL_TO_STRING(PunchHorn[e,d]);
+                  Retain_ATCLoadPunchList[c,12] := INT_TO_STRING(origNewIdx);
+                  NewAssignedDrawer[origNewIdx] := e;
+                  NewAssignedSlot[origNewIdx] := d;
+                  EXIT;
+                END_IF;
+              END_IF;
+            END_FOR;
+            IF foundIndex <> 0 THEN EXIT; END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+    END_FOR;
+
+    (* pack keep *)
+    KeepTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF KeepList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 16 DO
+          IF pDrawerName[k] = PFields_Old[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          KeepTempCount := KeepTempCount + 1;
+          KeepTempOrigIndex[KeepTempCount] := i;
+          KeepTempDrawerIdx[KeepTempCount] := foundIndex;
+          KeepTempOrder[KeepTempCount] := KeepTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO KeepTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO KeepTempCount DO
+        IF KeepTempDrawerIdx[b] < KeepTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (KeepTempDrawerIdx[b] = KeepTempDrawerIdx[minIdx]) AND (KeepTempOrder[b] < KeepTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := KeepTempOrigIndex[a];
+        KeepTempOrigIndex[a] := KeepTempOrigIndex[minIdx];
+        KeepTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := KeepTempDrawerIdx[a];
+        KeepTempDrawerIdx[a] := KeepTempDrawerIdx[minIdx];
+        KeepTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := KeepTempOrder[a];
+        KeepTempOrder[a] := KeepTempOrder[minIdx];
+        KeepTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    KeepCount := 0;
+    FOR a := 1 TO KeepTempCount DO
+      KeepCount := KeepCount + 1;
+      i := KeepTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_KeepPunchList[KeepCount, j] := PFields_Old[i, j];
+        Retain_KeepPunchListNew[KeepCount, j] := '';
+      END_FOR;
+      Retain_KeepPunchList[KeepCount, 12] := INT_TO_STRING(i);
+
+      tmpInt := 0;
+      FOR b := 1 TO 15 DO
+        IF NewMatchedToOld[b] = i THEN
+          tmpInt := b;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF tmpInt <> 0 THEN
+        FOR j := 1 TO 12 DO
+          Retain_KeepPunchListNew[KeepCount, j] := PFields[tmpInt, j];
+        END_FOR;
+        Retain_KeepPunchListNew[KeepCount, 12] := INT_TO_STRING(tmpInt);
+      END_IF;
+    END_FOR;
+
+    (* relocate selection *)
+    RightmostDragUnloadPos := -1.0;
+    RightmostDragLoadPos := -1.0;
+
+    FOR i := 1 TO 15 DO
+      IF UnloadOnlyList[i] THEN
+        eTmp := 0;
+        IF PFields_Old[i,10] <> '' THEN
+          eTmp := STRING_TO_INT(PFields_Old[i,10]);
+        END_IF;
+        IF (eTmp <> 4) AND (eTmp <> 8) AND (eTmp <> 12) AND (eTmp <> 16) THEN
+          IF PFields_Old[i,6] > '' THEN
+            tmpPos := STRING_TO_LREAL(PFields_Old[i,6]);
+            IF tmpPos > RightmostDragUnloadPos THEN
+              RightmostDragUnloadPos := tmpPos;
+            END_IF;
+          END_IF;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR i := 1 TO 15 DO
+      IF LoadOnlyList[i] THEN
+        eTmp := 0;
+        IF PFields[i,10] <> '' THEN
+          eTmp := STRING_TO_INT(PFields[i,10]);
+        END_IF;
+        IF (eTmp <> 4) AND (eTmp <> 8) AND (eTmp <> 12) AND (eTmp <> 16) THEN
+          IF PFields[i,6] > '' THEN
+            tmpPos := STRING_TO_LREAL(PFields[i,6]);
+            IF tmpPos > RightmostDragLoadPos THEN
+              RightmostDragLoadPos := tmpPos;
+            END_IF;
+          END_IF;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    IF RightmostDragUnloadPos < 0.0 THEN RightmostDragUnloadPos := 0.0; END_IF;
+    IF RightmostDragLoadPos < 0.0 THEN RightmostDragLoadPos := 0.0; END_IF;
+
+    RelocateThreshold := MAX(RightmostDragUnloadPos, RightmostDragLoadPos);
+
+    RelocateCount := 0;
+    FOR a := 1 TO KeepCount DO
+      i := KeepTempOrigIndex[a];
+      hasRelocateOverlap := FALSE;
+
+      IF PFields_Old[i,6] > '' THEN
+        tmpPos := STRING_TO_LREAL(PFields_Old[i,6]);
+
+        IF tmpPos < RelocateThreshold THEN
+          hasRelocateOverlap := TRUE;
+        END_IF;
+      END_IF;
+
+      IF hasRelocateOverlap THEN
+        RelocateCount := RelocateCount + 1;
+        FOR j := 1 TO 12 DO
+          Retain_RelocatePunchList[RelocateCount, j] := Retain_KeepPunchList[a, j];
+        END_FOR;
+      END_IF;
+    END_FOR;
+
+    Busy := FALSE;
+    Done := TRUE;
+  ELSE
+    Busy := FALSE;
+    Done := TRUE;
+  END_IF;
+
+END_IF;
+RelocateTrashold_Value:=RelocateThreshold;

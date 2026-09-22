@@ -1,0 +1,60 @@
+    RelocateCount := 0;
+    FOR a := 1 TO KeepCount DO
+      i := KeepTempOrigIndex[a];
+      hasRelocateOverlap := FALSE;
+
+      IF PFields_Old[i,6] > '' THEN
+        tmpPos := STRING_TO_LREAL(PFields_Old[i,6]);
+
+        IF tmpPos < RelocateThreshold THEN
+          hasRelocateOverlap := TRUE;
+        END_IF;
+      END_IF;
+
+      IF hasRelocateOverlap THEN
+        RelocateCount := RelocateCount + 1;
+        FOR j := 1 TO 12 DO
+          Retain_RelocatePunchList[RelocateCount, j] := Retain_KeepPunchList[a, j];
+        END_FOR;
+      END_IF;
+    END_FOR;
+
+    (* ------------------------------------------------------------ *)
+    (* Relocate threshold refinement:                                *)
+    (* RelocateThreshold sadece drag-unload/drag-load punch'lara     *)
+    (* göre hesaplandı. Ancak RelocateThreshold'un sağında,          *)
+    (* relocate edilmeyen (hâlâ keep olarak duran) punch'lar olabilir.*)
+    (* Böyle punch'lar varsa relocate edilen punch bunların üzerine   *)
+    (* gönderilmemeli; bu yüzden eşik, bu punch'lar arasındaki en     *)
+    (* büyük (en sağdaki) pozisyona göre güncellenmeli.               *)
+    (* ------------------------------------------------------------ *)
+    MaxKeepAboveThreshold := 0.0;
+    FoundKeepAboveThreshold := FALSE;
+
+    FOR a := 1 TO KeepCount DO
+      IF Retain_KeepPunchList[a,6] <> '' THEN
+        tmpPos := STRING_TO_LREAL(Retain_KeepPunchList[a,6]);
+
+        IF tmpPos > RelocateThreshold THEN
+          IF (NOT FoundKeepAboveThreshold) OR (tmpPos > MaxKeepAboveThreshold) THEN
+            MaxKeepAboveThreshold := tmpPos;
+            FoundKeepAboveThreshold := TRUE;
+          END_IF;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    IF FoundKeepAboveThreshold THEN
+      RelocateTrashold_Value := MaxKeepAboveThreshold;
+    ELSE
+      RelocateTrashold_Value := RelocateThreshold;
+    END_IF;
+
+    Busy := FALSE;
+    Done := TRUE;
+  ELSE
+    Busy := FALSE;
+    Done := TRUE;
+  END_IF;
+
+END_IF;

@@ -1,0 +1,117 @@
+PKeep_SH_SubState.PKSH_ANALYZE_INIT:
+  IF NeedReAnalyze THEN
+    KeepCount := 0;
+    FOR i := 1 TO 15 DO
+      PunchActive[i] := FALSE;
+      MoveTypeCandidate[i] := 0;
+      TargetBlocked[i] := FALSE;
+      SweepBlocked[i] := FALSE;
+      DirectCandidateIndex[i] := 0;
+      PickPlaceCandidateIndex[i] := 0;
+      BlockedCandidateIndex[i] := 0;
+
+      IF (Retain_KeepPunchList[i,3] <> '') AND (Retain_KeepPunchListNew[i,3] <> '') THEN
+        KeepCount := KeepCount + 1;
+        PunchActive[i] := TRUE;
+
+        IF Retain_KeepPunchList[i,12] <> '' THEN
+          KeepOldIndex[i] := STRING_TO_INT(Retain_KeepPunchList[i,12]);
+        ELSE
+          KeepOldIndex[i] := 0;
+        END_IF;
+
+        IF Retain_KeepPunchListNew[i,12] <> '' THEN
+          KeepNewIndex[i] := STRING_TO_INT(Retain_KeepPunchListNew[i,12]);
+        ELSE
+          KeepNewIndex[i] := 0;
+        END_IF;
+
+        IF Retain_KeepPunchList[i,7] <> '' THEN
+          KeepWidth[i] := STRING_TO_LREAL(Retain_KeepPunchList[i,7]);
+        ELSE
+          KeepWidth[i] := 0.0;
+        END_IF;
+
+        IF Retain_KeepPunchList[i,6] <> '' THEN
+          KeepOldZ[i] := STRING_TO_LREAL(Retain_KeepPunchList[i,6]) + ZOffset;
+        ELSE
+          KeepOldZ[i] := 0.0 + ZOffset;
+        END_IF;
+
+        IF KeepCurrentZ[i] = 0.0 THEN
+          KeepCurrentZ[i] := KeepOldZ[i];
+        END_IF;
+
+        IF Retain_KeepPunchListNew[i,6] <> '' THEN
+          KeepNewZ[i] := STRING_TO_LREAL(Retain_KeepPunchListNew[i,6]) + ZOffset;
+        ELSE
+          KeepNewZ[i] := 0.0 + ZOffset;
+        END_IF;
+
+        tmpHalfWidth := KeepWidth[i] / 2.0;
+
+        OldRangeStart[i] := KeepOldZ[i] - tmpHalfWidth;
+        OldRangeEnd[i] := KeepOldZ[i] + tmpHalfWidth;
+
+        CurrentRangeStart[i] := KeepCurrentZ[i] - tmpHalfWidth;
+        CurrentRangeEnd[i] := KeepCurrentZ[i] + tmpHalfWidth;
+
+        NewRangeStart[i] := KeepNewZ[i] - tmpHalfWidth;
+        NewRangeEnd[i] := KeepNewZ[i] + tmpHalfWidth;
+
+        SweepStart[i] := MIN(KeepCurrentZ[i], KeepNewZ[i]) - tmpHalfWidth;
+        SweepEnd[i] := MAX(KeepCurrentZ[i], KeepNewZ[i]) + tmpHalfWidth;
+      END_IF;
+    END_FOR;
+
+    (* -------------------------------------------------------- *)
+    (* Hangi PFields_Old satırlarının aktif keep punch'lara ait *)
+    (* olduğunu işaretle (hem eski hem final hedef satır).       *)
+    (* -------------------------------------------------------- *)
+    FOR i := 1 TO 15 DO
+      IsKeepRow[i] := FALSE;
+    END_FOR;
+
+    FOR i := 1 TO 15 DO
+      IF PunchActive[i] THEN
+        IF (KeepOldIndex[i] >= 1) AND (KeepOldIndex[i] <= 15) THEN
+          IsKeepRow[KeepOldIndex[i]] := TRUE;
+        END_IF;
+        IF (KeepNewIndex[i] >= 1) AND (KeepNewIndex[i] <= 15) THEN
+          IsKeepRow[KeepNewIndex[i]] := TRUE;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    (* -------------------------------------------------------- *)
+    (* Keep listesine ait olmayan ama PFields_Old'da dolu olan   *)
+    (* her satır: drag-load ile yerleşmiş veya başka bir sabit   *)
+    (* punch demektir -> sabit engel (obstacle) olarak işaretle. *)
+    (* -------------------------------------------------------- *)
+    FOR i := 1 TO 15 DO
+      ObstacleActive[i] := FALSE;
+      ObstacleStart[i] := 0.0;
+      ObstacleEnd[i] := 0.0;
+
+      IF (NOT IsKeepRow[i]) AND (PFields_Old[i,3] <> '') THEN
+        ObstacleActive[i] := TRUE;
+
+        tmpWidth := 0.0;
+        IF PFields_Old[i,7] <> '' THEN
+          tmpWidth := STRING_TO_LREAL(PFields_Old[i,7]);
+        END_IF;
+
+        tmpLReal := 0.0;
+        IF PFields_Old[i,6] <> '' THEN
+          tmpLReal := STRING_TO_LREAL(PFields_Old[i,6]) + ZOffset;
+        END_IF;
+
+        ObstacleStart[i] := tmpLReal - (tmpWidth / 2.0);
+        ObstacleEnd[i] := tmpLReal + (tmpWidth / 2.0);
+      END_IF;
+    END_FOR;
+
+    NeedReAnalyze := FALSE;
+  END_IF;
+
+  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_FIND_LEFTMOST;

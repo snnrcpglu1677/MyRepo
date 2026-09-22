@@ -1,0 +1,3 @@
+VAR
+  m : INT;
+END_VAR

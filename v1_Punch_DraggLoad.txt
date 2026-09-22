@@ -1,0 +1,1847 @@
+FUNCTION_BLOCK Punch_DraggLoad
+
+VAR_INPUT
+  LoadStartCmd      : BOOL;   (* State_Machine'den gelen başlat komutu *)
+  Reset             : BOOL;   (* SOFT reset: state/substate resetlemez, sadece requestleri keser *)
+  Abort_Cycle       : BOOL;   (* HARD abort: tüm FB içi state/substate/flagleri resetler *)
+  Automatic_Page    : BOOL;   (* TRUE: otomatik sayfa aktif, FALSE: otomatik dışı -> pause zorunlu *)
+END_VAR
+
+VAR_IN_OUT
+  General_Stop      : BOOL;
+  General_Start     : BOOL;   (* Enable/pause: FALSE iken pause, TRUE iken devam *)
+END_VAR
+
+VAR_OUTPUT
+  LoadStartAck      : BOOL;   (* State_Machine'e ACK *)
+  LoadBusy          : BOOL;   (* FB aktif çalışıyor *)
+  LoadError         : BOOL;   (* hata flag *)
+  LoadDone          : BOOL;   (* tüm dragg load bitti *)
+END_VAR
+
+VAR RETAIN
+  {attribute 'ac_persist':='PersistenceChannel'} Local_Shuttle_State      : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} Local_WareHouse_State    : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} Local_RotArm_State       : INT := 0;
+
+  {attribute 'ac_persist':='PersistenceChannel'} LoadedPunchCount         : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} DragLoadPunchCount       : INT := 0;
+
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggLoad_WH_SubStates      : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggLoad_SH_SubStates      : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggLoad_RotArm_SubStates  : INT := 0;
+
+  lastStartCmd             : BOOL := FALSE;
+  initiated                : BOOL := FALSE;
+  DragLoadPrepared         : BOOL := FALSE;
+
+  Current_PunchIndex       : INT := 0;      (* 0 = yok, 1..15 geçerli *)
+  Current_PunchLoaded      : BOOL := FALSE;
+  LastInitializedPunch     : INT := 0;
+
+  (* Drag ordering helper arrays *)
+  DragLoadSrcIndex         : ARRAY[1..15] OF INT;
+  DragLoadDrawerNo         : ARRAY[1..15] OF INT;
+  DragLoadSlotNo           : ARRAY[1..15] OF INT;
+  DragLoadOrderUsed        : ARRAY[1..15] OF BOOL;
+
+  (* Warehouse internal flags *)
+  WH_TargetDrawerIdx       : INT := 0;
+  WH_TargetRackID          : INT := 0;
+  WH_NeedRackBring         : BOOL := FALSE;
+  WH_NeedRackChange        : BOOL := FALSE;
+  WH_SameRack              : BOOL := FALSE;
+
+  WH_R_MoveRequested       : BOOL := FALSE;
+  WH_X_MoveRequested       : BOOL := FALSE;
+  WH_R_Done                : BOOL := FALSE;
+  WH_X_Done                : BOOL := FALSE;
+  WH_WaitRackInPos         : BOOL := FALSE;
+
+  WH_Eps                   : REAL := 0.01;
+
+  WH_R_LoadRequested       : BOOL := FALSE;
+  WH_R_LoadDone            : BOOL := FALSE;
+  R_Not_Safety_Zone        : BOOL := FALSE;
+  Rack_Presence_Error      : BOOL := FALSE;
+
+  (* Shuttle flags *)
+  SH_DX_MoveRequested      : BOOL := FALSE;
+  SH_DX_Done               : BOOL := FALSE;
+  SH_DR_MoveRequested      : BOOL := FALSE;
+  SH_DR_Done               : BOOL := FALSE;
+  SH_Z_MoveRequested       : BOOL := FALSE;
+  SH_Z_Done                : BOOL := FALSE;
+
+  (* Rotation Arm flags *)
+  RA_W_MoveRequested       : BOOL := FALSE;
+  RA_W_Done                : BOOL := FALSE;
+  RotArm_ReadyForLoad      : BOOL := FALSE;
+  RotArm_RotationDone      : BOOL := FALSE;
+  RotArm_PunchReleased     : BOOL := FALSE;
+  RotRequired              : BOOL := FALSE;
+END_VAR
+
+VAR
+  risingStart              : BOOL;
+  AutoRunEnable            : BOOL;
+  i                        : INT;
+  j                        : INT;
+  k                        : INT;
+  l                        : INT;
+  tmpInt                   : INT;
+  tmpInt2                  : INT;
+  tmpSrc                   : INT;
+
+  ClampOff_Timer           : TON;
+  ClampOn_Timer            : TON;
+END_VAR
+
+
+(* ------------------------------------------------------------ *)
+(* Combined enable: must be on Auto page AND General_Start TRUE *)
+(* ------------------------------------------------------------ *)
+AutoRunEnable := (General_Start AND Automatic_Page);
+ClampOff_Timer(PT := TO_TIME(TO_INT(Retain_GeneralParameters[4] * 1000)));
+ClampOn_Timer(PT := TO_TIME(TO_INT(Retain_GeneralParameters[3] * 1000)));
+
+risingStart := (LoadStartCmd AND NOT lastStartCmd);
+
+
+(* ------------------------------------------------------------ *)
+(* HARD ABORT: reset all FB-internal state (lists are untouched)*)
+(* ------------------------------------------------------------ *)
+IF Abort_Cycle THEN
+  LoadStartAck := FALSE;
+  LoadBusy := FALSE;
+  LoadError := FALSE;
+  LoadDone := FALSE;
+
+  lastStartCmd := FALSE;
+  initiated := FALSE;
+  DragLoadPrepared := FALSE;
+
+  Current_PunchIndex := 0;
+  Current_PunchLoaded := FALSE;
+  LastInitializedPunch := 0;
+
+  LoadedPunchCount := 0;
+  DragLoadPunchCount := 0;
+
+  Local_Shuttle_State := 0;
+  Local_WareHouse_State := 0;
+  Local_RotArm_State := 0;
+
+  PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_IDLE;
+  PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_SH_IDLE;
+  PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE;
+
+  WH_TargetDrawerIdx := 0;
+  WH_TargetRackID := 0;
+  WH_NeedRackBring := FALSE;
+  WH_NeedRackChange := FALSE;
+  WH_SameRack := FALSE;
+
+  WH_R_MoveRequested := FALSE;
+  WH_X_MoveRequested := FALSE;
+  WH_R_Done := FALSE;
+  WH_X_Done := FALSE;
+  WH_WaitRackInPos := FALSE;
+
+  WH_R_LoadRequested := FALSE;
+  WH_R_LoadDone := FALSE;
+  R_Not_Safety_Zone := FALSE;
+  Rack_Presence_Error := FALSE;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  RA_W_MoveRequested := FALSE;
+  RA_W_Done := FALSE;
+  RotArm_ReadyForLoad := FALSE;
+  RotArm_RotationDone := FALSE;
+  RotArm_PunchReleased := FALSE;
+  RotRequired := FALSE;
+
+  arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
+
+  arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+
+  RETURN;
+END_IF
+
+
+(* ------------------------------------------------------------ *)
+(* PAUSE: freeze states, cut requests                           *)
+(* ------------------------------------------------------------ *)
+IF NOT AutoRunEnable AND NOT PLC_PRG.HMI.Drawer_Demand_Enable THEN
+  arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+
+  lastStartCmd := LoadStartCmd;
+  RETURN;
+END_IF
+
+
+(* ------------------------------------------------------------ *)
+(* SOFT RESET: do not reset states/substates; only cut requests *)
+(* ------------------------------------------------------------ *)
+IF Reset THEN
+  arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+END_IF
+
+
+(* ------------------------------------------------------------ *)
+(* START + DRAG LOAD LIST PREPARATION                            *)
+(* Filter: Retain_LoadPunchList[i,3]<>'' AND [i,2]='1' (dragg)   *)
+(* Sort: drawer no ascending, slot no DESCENDING within drawer   *)
+(* ------------------------------------------------------------ *)
+IF risingStart THEN
+  initiated := TRUE;
+  LoadBusy := TRUE;
+  LoadError := FALSE;
+  LoadDone := FALSE;
+  DragLoadPrepared := FALSE;
+
+  LoadedPunchCount := 0;
+  DragLoadPunchCount := 0;
+
+  FOR i := 1 TO 15 DO
+    DragLoadSrcIndex[i] := 0;
+    DragLoadDrawerNo[i] := 0;
+    DragLoadSlotNo[i] := 0;
+    DragLoadOrderUsed[i] := FALSE;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    IF Retain_LoadPunchList[i,3] <> '' THEN
+      LoadedPunchCount := i;
+    END_IF;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    IF (Retain_LoadPunchList[i,3] <> '') AND (Retain_LoadPunchList[i,2] = '1') THEN
+      DragLoadPunchCount := DragLoadPunchCount + 1;
+      DragLoadSrcIndex[DragLoadPunchCount] := i;
+
+      IF Retain_ATCLoadPunchList[i,2] <> '' THEN
+        DragLoadDrawerNo[DragLoadPunchCount] := STRING_TO_INT(Retain_ATCLoadPunchList[i,2]);
+      ELSE
+        DragLoadDrawerNo[DragLoadPunchCount] := 0;
+      END_IF;
+
+      IF Retain_ATCLoadPunchList[i,3] <> '' THEN
+        DragLoadSlotNo[DragLoadPunchCount] := STRING_TO_INT(Retain_ATCLoadPunchList[i,3]);
+      ELSE
+        DragLoadSlotNo[DragLoadPunchCount] := 0;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  (* Sort: drawer no ascending; within same drawer, slot no DESCENDING *)
+  FOR i := 1 TO DragLoadPunchCount - 1 DO
+    FOR j := i + 1 TO DragLoadPunchCount DO
+      IF (DragLoadDrawerNo[j] < DragLoadDrawerNo[i]) OR
+         ((DragLoadDrawerNo[j] = DragLoadDrawerNo[i]) AND (DragLoadSlotNo[j] > DragLoadSlotNo[i])) THEN
+
+        tmpInt := DragLoadSrcIndex[i];
+        DragLoadSrcIndex[i] := DragLoadSrcIndex[j];
+        DragLoadSrcIndex[j] := tmpInt;
+
+        tmpInt := DragLoadDrawerNo[i];
+        DragLoadDrawerNo[i] := DragLoadDrawerNo[j];
+        DragLoadDrawerNo[j] := tmpInt;
+
+        tmpInt := DragLoadSlotNo[i];
+        DragLoadSlotNo[i] := DragLoadSlotNo[j];
+        DragLoadSlotNo[j] := tmpInt;
+      END_IF;
+    END_FOR;
+  END_FOR;
+
+  (* Copy to drag-load lists, keeping ATC data synchronized *)
+  FOR i := 1 TO DragLoadPunchCount DO
+    tmpSrc := DragLoadSrcIndex[i];
+
+    FOR k := 1 TO 12 DO
+      Retain_DragLoadPunchList[i,k] := Retain_LoadPunchList[tmpSrc,k];
+      Retain_ATCDragLoadPunchList[i,k] := Retain_ATCLoadPunchList[tmpSrc,k];
+    END_FOR;
+  END_FOR;
+
+  IF DragLoadPunchCount = 0 THEN
+    Current_PunchIndex := 0;
+    Current_PunchLoaded := FALSE;
+    LoadDone := TRUE;
+    initiated := FALSE;
+
+    Local_WareHouse_State := 0;
+    Local_Shuttle_State := 0;
+    Local_RotArm_State := 0;
+
+    PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_IDLE;
+    PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_SH_IDLE;
+    PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE;
+  ELSE
+    Current_PunchIndex := 1;
+    Current_PunchLoaded := TRUE;
+    LoadDone := FALSE;
+    DragLoadPrepared := TRUE;
+
+    Local_WareHouse_State := WareHouse_States.DL_PDrawer_pickup_start;
+    PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_INIT;
+
+    Local_Shuttle_State := Shuttle_States.DL_Shuttle_starts_PPick_up;
+    PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_INIT;
+
+    Local_RotArm_State := RotationArm_States.DL_RotArm_Init_And_Home;
+    PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_CHECK_POSITION;
+  END_IF;
+
+  LoadStartAck := TRUE;
+
+ELSIF initiated AND LoadStartCmd THEN
+  LoadStartAck := TRUE;
+  LoadBusy := TRUE;
+
+ELSIF initiated AND NOT LoadStartCmd THEN
+  LoadStartAck := FALSE;
+  LoadBusy := TRUE;
+
+ELSE
+  LoadStartAck := FALSE;
+  IF NOT initiated THEN
+    LoadBusy := FALSE;
+  END_IF;
+END_IF
+
+
+(* ------------------------------------------------------------ *)
+(* New punch initialization                                     *)
+(* ------------------------------------------------------------ *)
+IF (Current_PunchIndex <> 0) AND (Current_PunchIndex <> LastInitializedPunch) THEN
+  Local_WareHouse_State := WareHouse_States.DL_PDrawer_pickup_start;
+  Local_Shuttle_State := Shuttle_States.DL_Shuttle_starts_PPick_up;
+  LastInitializedPunch := Current_PunchIndex;
+
+  WH_TargetDrawerIdx := 0;
+  WH_TargetRackID := 0;
+  WH_NeedRackBring := FALSE;
+  WH_NeedRackChange := FALSE;
+  WH_SameRack := FALSE;
+
+  WH_R_MoveRequested := FALSE;
+  WH_X_MoveRequested := FALSE;
+  WH_R_Done := FALSE;
+  WH_X_Done := FALSE;
+  WH_WaitRackInPos := FALSE;
+
+  R_Not_Safety_Zone := FALSE;
+  WH_R_LoadRequested := FALSE;
+  WH_R_LoadDone := FALSE;
+  Rack_Presence_Error := FALSE;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  RotRequired := FALSE;
+  RotArm_RotationDone := FALSE;
+  RotArm_PunchReleased := FALSE;
+
+  PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_INIT;
+  PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_INIT;
+END_IF
+
+
+(* ============================================================ *)
+(* Rotation Arm Engine                                          *)
+(* ============================================================ *)
+IF LoadStartCmd THEN
+
+  CASE Local_RotArm_State OF
+
+    RotationArm_States.DL_RotArm_Init_And_Home:
+
+      CASE PDraggLoad_RotArm_SubStates OF
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE:
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_CHECK_POSITION;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_CHECK_POSITION:
+          RotArm_ReadyForLoad := FALSE;
+          RotArm_RotationDone := FALSE;
+          RotArm_PunchReleased := FALSE;
+          RA_W_MoveRequested := FALSE;
+          RA_W_Done := FALSE;
+
+          IF Fmsc_PLC_IO.Rotation_Arm_Inside THEN
+            IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - 90.0) <= WH_Eps THEN
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_MOVE_OUTSIDE_CMD;
+            ELSE
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_90_REQ;
+            END_IF;
+
+          ELSIF Fmsc_PLC_IO.Rotation_Arm_Outside THEN
+            IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - 180.0) <= WH_Eps THEN
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_LOCK_CMD;
+            ELSE
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_REQ;
+            END_IF;
+
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_90_REQ:
+          arAxes[EN_Axes.ATC_W].TargetPos := 90.0;
+          arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := TRUE;
+          RA_W_MoveRequested := TRUE;
+          RA_W_Done := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_90_WAIT;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_90_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) > WH_Eps) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_90_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+            RA_W_MoveRequested := FALSE;
+            RA_W_Done := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_MOVE_OUTSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_MOVE_OUTSIDE_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Rotation_Arm_Move_Outside_Valve := TRUE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_OUTSIDE;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_OUTSIDE:
+          IF Fmsc_PLC_IO.Rotation_Arm_Outside THEN
+            Fmsc_PLC_IO.Rotation_Arm_Move_Outside_Valve := FALSE;
+
+            IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - 180.0) <= WH_Eps THEN
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_LOCK_CMD;
+            ELSE
+              PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_REQ;
+            END_IF;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_REQ:
+          arAxes[EN_Axes.ATC_W].TargetPos := 180.0;
+          arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := TRUE;
+          RA_W_MoveRequested := TRUE;
+          RA_W_Done := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_WAIT;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) > WH_Eps) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_W_TO_180_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+            RA_W_MoveRequested := FALSE;
+            RA_W_Done := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_LOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_LOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := FALSE;
+          Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := TRUE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_LOCKED;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_LOCKED:
+          IF Fmsc_PLC_IO.Rotation_Arm_Locked_CH2 AND Fmsc_PLC_IO.Rotation_Arm_Locked_CH3 THEN
+            RotArm_ReadyForLoad := TRUE;
+            Local_RotArm_State := RotationArm_States.DL_RotArm_Ready_For_Load;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_READY;
+          END_IF;
+
+      ELSE
+        PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_CHECK_POSITION;
+      END_CASE;
+
+
+    RotationArm_States.DL_RotArm_Ready_For_Load:
+
+      CASE PDraggLoad_RotArm_SubStates OF
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_READY:
+          RotArm_ReadyForLoad := TRUE;
+
+          IF RotRequired THEN
+            Local_RotArm_State := RotationArm_States.DL_RotArm_Rotation_Interrupt_Active;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_PUNCH_ON_ARM;
+          END_IF;
+
+      ELSE
+        PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_READY;
+      END_CASE;
+
+
+    RotationArm_States.DL_RotArm_Rotation_Interrupt_Active:
+
+      CASE PDraggLoad_RotArm_SubStates OF
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_PUNCH_ON_ARM:
+          RotArm_ReadyForLoad := FALSE;
+          RotArm_RotationDone := FALSE;
+          RotArm_PunchReleased := FALSE;
+
+          IF Fmsc_PLC_IO.Punch_Locked_on_Rotation_Arm THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_SHUTTLE_CLEAR;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_SHUTTLE_CLEAR:
+          IF (PDraggLoad_SH_SubStates = PDraggLoad_SH_SubState.PDLD_L13_DONE) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_ARM_UNLOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_ARM_UNLOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := TRUE;
+          Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_ARM_UNLOCKED;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_ARM_UNLOCKED:
+          IF Fmsc_PLC_IO.Rotation_Arm_Unlocked_CH2 AND Fmsc_PLC_IO.Rotation_Arm_Unlocked_CH3 THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_W_TO_ROTATED_REQ;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_W_TO_ROTATED_REQ:
+          arAxes[EN_Axes.ATC_W].TargetPos := 0.0;
+          arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := TRUE;
+          RA_W_MoveRequested := TRUE;
+          RA_W_Done := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_W_TO_ROTATED_WAIT;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_W_TO_ROTATED_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) > WH_Eps) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_W_TO_ROTATED_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+            RA_W_MoveRequested := FALSE;
+            RA_W_Done := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_ARM_LOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_ARM_LOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := TRUE;
+          Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_ARM_LOCKED;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_ARM_LOCKED:
+          IF Fmsc_PLC_IO.Rotation_Arm_Locked_CH2 AND Fmsc_PLC_IO.Rotation_Arm_Locked_CH3 THEN
+            RotArm_RotationDone := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_SHUTTLE_PICKBACK;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_SHUTTLE_PICKBACK:
+          IF (PDraggLoad_SH_SubStates = PDraggLoad_SH_SubState.PDLD_L15_WAIT_ROTARM_RELEASED) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_UNLOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_UNLOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Punch_Unlock_Valve := TRUE;
+          Fmsc_PLC_IO.Rotation_Arm_Punch_Lock_Valve := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_PUNCH_RELEASED;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_PUNCH_RELEASED:
+          IF NOT Fmsc_PLC_IO.Punch_Locked_on_Rotation_Arm THEN
+            RotArm_PunchReleased := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_UNLOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_UNLOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := TRUE;
+          Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_Z_SAFE_FOR_READY;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_Z_SAFE_FOR_READY:
+          IF arAxes[EN_Axes.ATC_Z].ActualPos > TO_LREAL(Retain_ZParameters[9]) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_UNLOCKED;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_UNLOCKED:
+          IF Fmsc_PLC_IO.Rotation_Arm_Unlocked_CH2 AND Fmsc_PLC_IO.Rotation_Arm_Unlocked_CH3 THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_W_TO_180_REQ;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_W_TO_180_REQ:
+          arAxes[EN_Axes.ATC_W].TargetPos := 180.0;
+          arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := TRUE;
+          RA_W_MoveRequested := TRUE;
+          RA_W_Done := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_W_TO_180_WAIT;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_W_TO_180_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) > WH_Eps) THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_W_TO_180_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - arAxes[EN_Axes.ATC_W].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+            RA_W_MoveRequested := FALSE;
+            RA_W_Done := TRUE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_LOCK_CMD;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_LOCK_CMD:
+          Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := TRUE;
+          Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := FALSE;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_LOCKED;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_RETURN_WAIT_LOCKED:
+          IF Fmsc_PLC_IO.Rotation_Arm_Locked_CH2 AND Fmsc_PLC_IO.Rotation_Arm_Locked_CH3 THEN
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_DONE;
+          END_IF;
+
+        PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_DONE:
+          RotRequired := FALSE;
+          RotArm_ReadyForLoad := TRUE;
+          Local_RotArm_State := RotationArm_States.DL_RotArm_Ready_For_Load;
+          PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_READY;
+
+      ELSE
+        PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INT_WAIT_PUNCH_ON_ARM;
+      END_CASE;
+
+  ELSE
+    ;
+  END_CASE;
+
+END_IF
+
+
+(* ============================================================ *)
+(* Warehouse macro states: DRAG LOAD punches (WH engine)         *)
+(* ============================================================ *)
+IF (Local_WareHouse_State = WareHouse_States.DL_PDrawer_pickup_start) OR
+   (Local_WareHouse_State = WareHouse_States.DL_Punches_rack_taken) OR
+   (Local_WareHouse_State = WareHouse_States.DL_PDrawer_pickup_Pos_reached) OR
+   (Local_WareHouse_State = WareHouse_States.DL_PPickup_from_drawer_allowed) THEN
+
+  IF Current_PunchIndex = 0 THEN
+    LoadError := TRUE;
+
+  ELSE
+
+    CASE PDraggLoad_WH_SubStates OF
+
+      PDraggLoad_WH_SubState.PDLD_IDLE:
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_INIT;
+
+      PDraggLoad_WH_SubState.PDLD_L09_INIT:
+        WH_TargetDrawerIdx := 0;
+        WH_TargetRackID := 0;
+        WH_NeedRackBring := FALSE;
+        WH_NeedRackChange := FALSE;
+        WH_SameRack := FALSE;
+
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_READ_TARGETS;
+
+      PDraggLoad_WH_SubState.PDLD_L09_READ_TARGETS:
+        IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+          WH_TargetDrawerIdx := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+        ELSE
+          WH_TargetDrawerIdx := 0;
+        END_IF;
+
+        IF WH_TargetDrawerIdx >= 1 THEN
+          tmpInt := WH_TargetDrawerIdx - 1;
+          WH_TargetRackID := TO_INT(tmpInt / 4) + 1;
+        ELSE
+          WH_TargetRackID := 0;
+        END_IF;
+
+        IF Current_Rack_Type = 0 THEN
+          WH_NeedRackBring := TRUE;
+          WH_NeedRackChange := FALSE;
+          WH_SameRack := FALSE;
+
+        ELSIF Current_Rack_Type = 1 THEN
+          WH_NeedRackBring := FALSE;
+          IF TO_INT(Current_Rack_ID) = WH_TargetRackID THEN
+            WH_SameRack := TRUE;
+            WH_NeedRackChange := FALSE;
+          ELSE
+            WH_SameRack := FALSE;
+            WH_NeedRackChange := TRUE;
+          END_IF;
+
+        ELSIF Current_Rack_Type = 2 THEN
+          WH_NeedRackBring := FALSE;
+          WH_NeedRackChange := TRUE;
+          WH_SameRack := FALSE;
+        END_IF;
+
+        IF WH_NeedRackBring THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_UNLOCK_CHECK;
+
+        ELSIF WH_SameRack THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_DRAWER_CHECK;
+
+        ELSIF WH_NeedRackChange THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_UNLOCK_CHECK;
+
+        ELSE
+          LoadError := TRUE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_DRAWER_CHECK:
+        IF Current_Drawer_ID = WH_TargetDrawerIdx THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_DONE;
+        ELSE
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_R_TO_DRAWER_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_R_TO_DRAWER_REQ:
+        IF (WH_TargetDrawerIdx >= 1) AND (WH_TargetDrawerIdx <= 16) THEN
+
+          IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - TO_LREAL(pDrawerParam1[WH_TargetDrawerIdx])) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+            WH_R_MoveRequested := FALSE;
+            WH_R_Done := TRUE;
+            Current_Drawer_ID := WH_TargetDrawerIdx;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_DONE;
+          ELSE
+            arAxes[EN_Axes.ATC_R].TargetPos := TO_LREAL(pDrawerParam1[WH_TargetDrawerIdx]);
+            arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+            WH_R_MoveRequested := TRUE;
+            WH_R_Done := FALSE;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_R_TO_DRAWER_WAIT;
+          END_IF;
+
+        ELSE
+          LoadError := TRUE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_R_TO_DRAWER_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_SAMERACK_R_TO_DRAWER_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := TRUE;
+          Current_Drawer_ID := WH_TargetDrawerIdx;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_DONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_UNLOCK_CHECK:
+        IF NOT (Fmsc_PLC_IO.Carriage_Unlocked_Left AND Fmsc_PLC_IO.Carriage_Unlocked_Right) THEN
+          Fmsc_PLC_IO.Carriage_UnLocking_Valve := TRUE;
+          FMSC_PLC_IO.Carriage_Locking_Valve := FALSE;
+        ELSE
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_SAFE_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_SAFE_REQ:
+        arAxes[EN_Axes.ATC_R].TargetPos := TO_LREAL(Retain_RParameters[3]);
+        arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+        WH_R_MoveRequested := TRUE;
+        WH_R_Done := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_SAFE_WAIT;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_SAFE_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_SAFE_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_REQ:
+        IF (Current_Drawer_ID >= 1) AND (Current_Drawer_ID <= 16) THEN
+
+          IF Current_Rack_Type = 2 THEN
+            IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - TO_LREAL(DDrawerParam2[TO_INT(Current_Drawer_ID)])) <= WH_Eps THEN
+              arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+              WH_X_MoveRequested := FALSE;
+              WH_X_Done := TRUE;
+              PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_REQ;
+            ELSE
+              arAxes[EN_Axes.ATC_X].TargetPos := TO_LREAL(DDrawerParam2[TO_INT(Current_Drawer_ID)]);
+              arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := TRUE;
+              WH_X_MoveRequested := TRUE;
+              WH_X_Done := FALSE;
+              PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_WAIT;
+            END_IF;
+          ELSE
+            IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - TO_LREAL(pDrawerParam2[TO_INT(Current_Drawer_ID)])) <= WH_Eps THEN
+              arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+              WH_X_MoveRequested := FALSE;
+              WH_X_Done := TRUE;
+              PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_REQ;
+            ELSE
+              arAxes[EN_Axes.ATC_X].TargetPos := TO_LREAL(pDrawerParam2[TO_INT(Current_Drawer_ID)]);
+              arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := TRUE;
+              WH_X_MoveRequested := TRUE;
+              WH_X_Done := FALSE;
+              PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_WAIT;
+            END_IF;
+          END_IF;
+
+        ELSE
+          LoadError := TRUE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_X_TO_CURRENT_DRAWER_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+          WH_X_MoveRequested := FALSE;
+          WH_X_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_REQ:
+        arAxes[EN_Axes.ATC_R].TargetPos := -10.0;
+        arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+        WH_R_MoveRequested := TRUE;
+        WH_R_Done := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_WAIT;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_R_TO_DROP_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_WAIT_RACK_RELEASED;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_WAIT_RACK_RELEASED:
+        IF NOT Fmsc_PLC_IO.Rack_Presence THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_CLEAR_CURRENT_INFO;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_RACKCHANGE_CLEAR_CURRENT_INFO:
+        Current_Rack_ID := 0;
+        Current_Rack_Type := 0;
+        Current_Drawer_ID := 0;
+
+        WH_NeedRackChange := FALSE;
+        WH_NeedRackBring := TRUE;
+        WH_SameRack := FALSE;
+
+        WH_R_MoveRequested := FALSE;
+        WH_X_MoveRequested := FALSE;
+        WH_R_Done := FALSE;
+        WH_X_Done := FALSE;
+        WH_WaitRackInPos := FALSE;
+
+        WH_R_LoadRequested := FALSE;
+        WH_R_LoadDone := FALSE;
+        R_Not_Safety_Zone := FALSE;
+        Rack_Presence_Error := FALSE;
+
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_UNLOCK_CHECK;
+
+      PDraggLoad_WH_SubState.PDLD_L09_UNLOCK_CHECK:
+        IF NOT (Fmsc_PLC_IO.Carriage_Unlocked_Left AND Fmsc_PLC_IO.Carriage_Unlocked_Right) THEN
+          Fmsc_PLC_IO.Carriage_UnLocking_Valve := TRUE;
+        ELSE
+          Fmsc_PLC_IO.Carriage_UnLocking_Valve := FALSE;
+
+          IF R_Not_Safety_Zone THEN
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_WAIT_R_SAFEZONE;
+          ELSE
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_REQ;
+          END_IF;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_WAIT_R_SAFEZONE:
+        IF arAxes[EN_Axes.ATC_R].ActualPos < TO_LREAL(Retain_RParameters[7]) THEN
+          R_Not_Safety_Zone := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_REQ:
+        IF arAxes[EN_Axes.ATC_R].ActualPos < TO_LREAL(Retain_RParameters[7]) THEN
+          arAxes[EN_Axes.ATC_R].TargetPos := -10.0;
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+          WH_R_MoveRequested := TRUE;
+          WH_R_Done := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_WAIT;
+        ELSE
+          R_Not_Safety_Zone := TRUE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_WAIT_R_SAFEZONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - (-10.0)) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_TO_PICKUP_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - (-10.0)) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_X_TO_DRAWER_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_X_TO_DRAWER_REQ:
+        IF WH_TargetDrawerIdx >= 1 THEN
+
+          IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - TO_LREAL(pDrawerParam2[WH_TargetDrawerIdx])) <= WH_Eps THEN
+            WH_X_Done := TRUE;
+            WH_X_MoveRequested := FALSE;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_REQ;
+          ELSE
+            arAxes[EN_Axes.ATC_X].TargetPos := TO_LREAL(pDrawerParam2[WH_TargetDrawerIdx]);
+            arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := TRUE;
+            WH_X_MoveRequested := TRUE;
+            WH_X_Done := FALSE;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_X_TO_DRAWER_WAIT;
+          END_IF;
+
+        ELSE
+          LoadError := TRUE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_X_TO_DRAWER_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_X_TO_DRAWER_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+          WH_X_MoveRequested := FALSE;
+          WH_X_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_REQ:
+        arAxes[EN_Axes.ATC_R].TargetPos := TO_LREAL(Retain_RParameters[3]);
+        arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+        WH_R_LoadRequested := TRUE;
+        WH_R_LoadDone := FALSE;
+        Rack_Presence_Error := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_WAIT;
+
+      PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_REQ;
+        END_IF;
+
+        IF arAxes[EN_Axes.ATC_R].ActualPos >= TO_LREAL(Retain_RParameters[7]) THEN
+
+          IF Fmsc_PLC_IO.Rack_Presence THEN
+            Current_Rack_ID := WH_TargetRackID;
+            Current_Rack_Type := 1;
+            Current_Drawer_ID := WH_TargetDrawerIdx;
+          ELSE
+            arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+            WH_R_LoadRequested := FALSE;
+            WH_R_LoadDone := FALSE;
+            Rack_Presence_Error := TRUE;
+
+            General_Stop := TRUE;
+            General_Start := FALSE;
+
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_ERROR_RACK_PRESENCE;
+          END_IF;
+
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_LoadRequested := FALSE;
+          WH_R_LoadDone := TRUE;
+          Rack_Presence_Error := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_WAIT_RACK_IN_POS;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_WAIT_RACK_IN_POS:
+        WH_WaitRackInPos := (WH_R_LoadDone AND WH_X_Done);
+
+        IF WH_WaitRackInPos THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_DONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_ERROR_RACK_PRESENCE:
+        WH_WaitRackInPos := FALSE;
+
+        IF arAxes[EN_Axes.ATC_R].ActualPos < TO_LREAL(Retain_RParameters[7]) THEN
+          Rack_Presence_Error := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_R_LIFT_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L09_DONE:
+        Local_WareHouse_State := WareHouse_States.DL_Punches_rack_taken;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_INIT;
+
+      PDraggLoad_WH_SubState.PDLD_L10_INIT:
+        WH_X_MoveRequested := FALSE;
+        WH_X_Done := FALSE;
+        WH_R_MoveRequested := FALSE;
+        WH_R_Done := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_X_TO_PICKPOS_REQ;
+
+      PDraggLoad_WH_SubState.PDLD_L10_X_TO_PICKPOS_REQ:
+        IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - TO_LREAL(Retain_XParameters[2])) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+          WH_X_MoveRequested := FALSE;
+          WH_X_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_REQ;
+        ELSE
+          arAxes[EN_Axes.ATC_X].TargetPos := TO_LREAL(Retain_XParameters[2]);
+          arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := TRUE;
+          WH_X_MoveRequested := TRUE;
+          WH_X_Done := FALSE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_X_TO_PICKPOS_WAIT;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L10_X_TO_PICKPOS_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_X_TO_PICKPOS_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_X].ActualPos - arAxes[EN_Axes.ATC_X].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
+          WH_X_MoveRequested := FALSE;
+          WH_X_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_REQ;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_REQ:
+        IF (WH_TargetDrawerIdx >= 1) AND (WH_TargetDrawerIdx <= 16) THEN
+
+          IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - TO_LREAL(pDrawerParam1[WH_TargetDrawerIdx])) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+            WH_R_MoveRequested := FALSE;
+            WH_R_Done := TRUE;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_DONE;
+          ELSE
+            arAxes[EN_Axes.ATC_R].TargetPos := TO_LREAL(pDrawerParam1[WH_TargetDrawerIdx]);
+            arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := TRUE;
+            WH_R_MoveRequested := TRUE;
+            WH_R_Done := FALSE;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_WAIT;
+          END_IF;
+
+        ELSE
+          LoadError := TRUE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_WAIT:
+        IF (NOT arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs) AND
+           (ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) > WH_Eps) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_R_TO_PICKPOS_REQ;
+        END_IF;
+
+        IF ABS(arAxes[EN_Axes.ATC_R].ActualPos - arAxes[EN_Axes.ATC_R].TargetPos) <= WH_Eps THEN
+          arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
+          WH_R_MoveRequested := FALSE;
+          WH_R_Done := TRUE;
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L10_DONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L10_DONE:
+        Local_WareHouse_State := WareHouse_States.DL_PDrawer_pickup_Pos_reached;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L11_INIT;
+
+      PDraggLoad_WH_SubState.PDLD_L11_INIT:
+        WH_X_MoveRequested := FALSE;
+        WH_X_Done := FALSE;
+        WH_R_MoveRequested := FALSE;
+        WH_R_Done := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L11_LOCK_CMD;
+
+      PDraggLoad_WH_SubState.PDLD_L11_LOCK_CMD:
+        Fmsc_PLC_IO.Carriage_UnLocking_Valve := FALSE;
+        Fmsc_PLC_IO.Carriage_Locking_Valve := TRUE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L11_WAIT_LOCKED;
+
+      PDraggLoad_WH_SubState.PDLD_L11_WAIT_LOCKED:
+        IF (Fmsc_PLC_IO.Carriage_Locked_Left AND Fmsc_PLC_IO.Carriage_Locked_Right) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L11_DONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L11_DONE:
+        Local_WareHouse_State := WareHouse_States.DL_PPickup_from_drawer_allowed;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_INIT;
+
+      PDraggLoad_WH_SubState.PDLD_L12_INIT:
+        WH_X_MoveRequested := FALSE;
+        WH_X_Done := FALSE;
+        WH_R_MoveRequested := FALSE;
+        WH_R_Done := FALSE;
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_SET_CURRENT_RACK;
+
+      PDraggLoad_WH_SubState.PDLD_L12_SET_CURRENT_RACK:
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_VERIFY_CURRENT_RACK;
+
+      PDraggLoad_WH_SubState.PDLD_L12_VERIFY_CURRENT_RACK:
+        IF (TO_INT(Current_Rack_ID) = WH_TargetRackID) AND
+           (Current_Rack_Type = 1) AND
+           (Current_Drawer_ID = WH_TargetDrawerIdx) THEN
+          PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_DONE;
+        END_IF;
+
+      PDraggLoad_WH_SubState.PDLD_L12_DONE:
+        PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L12_DONE;
+
+    ELSE
+      PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_INIT;
+    END_CASE;
+
+    IF WH_R_LoadDone AND WH_X_Done THEN
+      WH_WaitRackInPos := TRUE;
+    ELSE
+      WH_WaitRackInPos := FALSE;
+    END_IF;
+
+  END_IF;
+END_IF
+
+
+(* ============================================================ *)
+(* Shuttle main state machine (SH engine) - Drag Load            *)
+(* ============================================================ *)
+IF LoadStartCmd THEN
+
+  CASE Local_Shuttle_State OF
+
+    Shuttle_States.DL_Shuttle_starts_PPick_up:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_SH_IDLE:
+          ;
+
+        PDraggLoad_SH_SubState.PDLD_L10_INIT:
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          SH_Z_MoveRequested := FALSE;
+          SH_Z_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_REQ;
+
+        PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_REQ:
+          IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_Z].TargetPos := TO_LREAL(Retain_ATCDragLoadPunchList[Current_PunchIndex,5]);
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam3[tmpInt]);
+
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_Z_DR_TO_WH_PICKPOS_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF SH_Z_Done AND SH_DR_Done THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_WAIT_WH_READY;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_WAIT_WH_READY:
+          IF PDraggLoad_WH_SubStates = PDraggLoad_WH_SubState.PDLD_L12_DONE THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_DX_TO_WH_DRAWER_ALIGN_REQ;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_DX_TO_WH_DRAWER_ALIGN_REQ:
+          IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(pDrawerParam7[tmpInt]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_DX_TO_WH_DRAWER_ALIGN_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_DX_TO_WH_DRAWER_ALIGN_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_DX_TO_WH_DRAWER_ALIGN_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_PIN1_OUTSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_PIN1_OUTSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_WAIT_PIN1_OUTSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L10_WAIT_PIN1_OUTSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_PIN2_OUTSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L10_PIN2_OUTSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_WAIT_PIN2_OUTSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L10_WAIT_PIN2_OUTSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_DONE;
+          END_IF;
+
+        (* ----------------------------------------------------------- *)
+        (* Punch pick tamamlandı. RotRequired + PunchUsed + routing.   *)
+        (* L11/L12 direct-load extraction adımları drag'de yok.        *)
+        (* ----------------------------------------------------------- *)
+        PDraggLoad_SH_SubState.PDLD_L10_DONE:
+          RotRequired := FALSE;
+          PunchUsed[TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]), TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,3])] := TRUE;
+
+          IF Retain_DragLoadPunchList[Current_PunchIndex,8] <> '' THEN
+            RotRequired := (STRING_TO_INT(Retain_DragLoadPunchList[Current_PunchIndex,8]) = 1);
+          END_IF;
+
+          IF RotRequired THEN
+            IF RotArm_ReadyForLoad THEN
+              Local_Shuttle_State := Shuttle_States.DL_Punch_positioned_to_be_rot;
+              PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_INIT;
+            ELSE
+              PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_DONE;
+            END_IF;
+          ELSE
+            Local_Shuttle_State := Shuttle_States.DL_Punch_positioning_progress;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_INIT;
+          END_IF;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_INIT;
+      END_CASE;
+
+
+    Shuttle_States.DL_Punch_positioned_to_be_rot:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_L13_INIT:
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          SH_Z_MoveRequested := FALSE;
+          SH_Z_Done := FALSE;
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_REQ;
+
+        PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_REQ:
+          IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_Z].TargetPos := TO_LREAL(Retain_ZParameters[11]);
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam3[tmpInt]);
+
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DR_Z_TO_ROT_PICKPOS_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF SH_Z_Done AND SH_DR_Done THEN
+            Fmsc_PLC_IO.Rotation_Arm_Locking_Valve := TRUE;
+            Fmsc_PLC_IO.Rotation_Arm_Unlocking_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_WAIT_ROT_PUNCH_LOCKED;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_WAIT_ROT_PUNCH_LOCKED:
+          IF Fmsc_PLC_IO.Punch_Locked_on_Rotation_Arm THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_PIN2_INSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_PIN2_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_WAIT_PIN2_INSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L13_WAIT_PIN2_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_PIN1_INSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_PIN1_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_WAIT_PIN1_INSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L13_WAIT_PIN1_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_REQ;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(Retain_DRParameters[8]);
+          arAxes[EN_Axes.ATC_Z].TargetPos := TO_LREAL(Retain_ZParameters[8]);
+
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_WAIT;
+
+        PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DX_DR_Z_TO_ROT_SAFE_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF SH_DX_Done AND SH_DR_Done AND SH_Z_Done THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L13_DONE:
+          Local_Shuttle_State := Shuttle_States.DL_Punch_correctly_rotated;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L14_INIT;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L13_INIT;
+      END_CASE;
+
+
+    Shuttle_States.DL_Punch_correctly_rotated:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_L14_INIT:
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L14_WAIT_ROTARM_READY_TO_ROTATE;
+
+        PDraggLoad_SH_SubState.PDLD_L14_WAIT_ROTARM_READY_TO_ROTATE:
+          IF Local_RotArm_State = RotationArm_States.DL_RotArm_Rotation_Interrupt_Active THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L14_WAIT_ROTATION_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L14_WAIT_ROTATION_DONE:
+          IF RotArm_RotationDone THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L14_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L14_DONE:
+          Local_Shuttle_State := Shuttle_States.DL_Punch_Correctly_taken_after_rot;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_INIT;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L14_INIT;
+      END_CASE;
+
+
+    Shuttle_States.DL_Punch_Correctly_taken_after_rot:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_L15_INIT:
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          SH_Z_MoveRequested := FALSE;
+          SH_Z_Done := FALSE;
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_REQ;
+
+        PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_REQ:
+          IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_Z].TargetPos := TO_LREAL(Retain_ZParameters[11]);
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam3[tmpInt]);
+
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DR_Z_TO_ROT_PICKUP_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF SH_DR_Done AND SH_Z_Done THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DX_TO_ROT_PICKUP_REQ;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_DX_TO_ROT_PICKUP_REQ:
+          IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(pDrawerParam7[tmpInt]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DX_TO_ROT_PICKUP_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_DX_TO_ROT_PICKUP_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DX_TO_ROT_PICKUP_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_PIN1_OUTSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_PIN1_OUTSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_WAIT_PIN1_OUTSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L15_WAIT_PIN1_OUTSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_PIN2_OUTSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_PIN2_OUTSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_WAIT_PIN2_OUTSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L15_WAIT_PIN2_OUTSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_WAIT_ROTARM_RELEASED;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_WAIT_ROTARM_RELEASED:
+          IF RotArm_PunchReleased THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L15_DONE:
+          Local_Shuttle_State := Shuttle_States.DL_Punch_positioning_progress;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_INIT;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L15_INIT;
+      END_CASE;
+
+
+    Shuttle_States.DL_Punch_positioning_progress:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_L16_INIT:
+          SH_Z_MoveRequested := FALSE;
+          SH_Z_Done := FALSE;
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_PRESS_CLAMP_OFF_CMD;
+
+        PDraggLoad_SH_SubState.PDLD_L16_PRESS_CLAMP_OFF_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
+          ClampOff_Timer.IN := TRUE;
+          IF ClampOff_Timer.Q THEN
+            ClampOff_Timer.IN := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_REQ;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_REQ:
+          IF (Retain_DragLoadPunchList[Current_PunchIndex,6] <> '') AND
+             (Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '') THEN
+
+            tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
+
+            arAxes[EN_Axes.ATC_Z].TargetPos := STRING_TO_LREAL(Retain_DragLoadPunchList[Current_PunchIndex,6]) + REAL_TO_LREAL(Retain_ZParameters[19]);
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam6[tmpInt]);
+
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_WAIT;
+          ELSE
+            LoadError := TRUE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_REQ;
+          END_IF;
+
+          IF (NOT arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_Z_DR_TO_PRESS_LOADPOS_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF SH_Z_Done AND SH_DR_Done THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L16_DONE:
+          Local_Shuttle_State := Shuttle_States.DL_Punch_positioning_completed;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_INIT;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L16_INIT;
+      END_CASE;
+
+
+    Shuttle_States.DL_Punch_positioning_completed:
+
+      CASE PDraggLoad_SH_SubStates OF
+
+        PDraggLoad_SH_SubState.PDLD_L17_INIT:
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD;
+
+        PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+          ClampOn_Timer.IN := TRUE;
+          IF ClampOn_Timer.Q THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            ClampOn_Timer.IN := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PIN2_INSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_PIN2_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_WAIT_PIN2_INSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L17_WAIT_PIN2_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PIN1_INSIDE_CMD;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_PIN1_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_WAIT_PIN1_INSIDE;
+
+        PDraggLoad_SH_SubState.PDLD_L17_WAIT_PIN1_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_DX_TO_SAFE_REQ;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_DX_TO_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_DX_TO_SAFE_WAIT;
+
+        PDraggLoad_SH_SubState.PDLD_L17_DX_TO_SAFE_WAIT:
+          IF (NOT arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs) AND
+             (ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) > WH_Eps) THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_DX_TO_SAFE_REQ;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= WH_Eps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_DONE;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_DONE:
+          tmpInt2 := 0;
+          IF Retain_DragLoadPunchList[Current_PunchIndex,12] <> '' THEN
+            tmpInt2 := STRING_TO_INT(Retain_DragLoadPunchList[Current_PunchIndex,12]);
+          END_IF;
+
+          IF (tmpInt2 >= 1) AND (tmpInt2 <= 15) THEN
+            FOR l := 1 TO 12 DO
+              PFields_Old[tmpInt2, l] := Retain_DragLoadPunchList[Current_PunchIndex, l];
+            END_FOR;
+
+            IF Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '' THEN
+              PFields_Old[tmpInt2,10] := Retain_ATCDragLoadPunchList[Current_PunchIndex,2];
+            ELSE
+              PFields_Old[tmpInt2,10] := '';
+            END_IF;
+
+            IF Retain_ATCDragLoadPunchList[Current_PunchIndex,3] <> '' THEN
+              PFields_Old[tmpInt2,11] := Retain_ATCDragLoadPunchList[Current_PunchIndex,3];
+            ELSE
+              PFields_Old[tmpInt2,11] := '';
+            END_IF;
+          END_IF;
+
+          Current_PunchIndex := Current_PunchIndex + 1;
+          Current_Punch_Count := Current_Punch_Count + 1;
+
+          IF Current_PunchIndex > DragLoadPunchCount THEN
+            Current_PunchIndex := 0;
+            Current_PunchLoaded := FALSE;
+            LoadDone := TRUE;
+            initiated := FALSE;
+            LoadBusy := FALSE;
+            DragLoadPrepared := FALSE;
+            LastInitializedPunch := 0;
+
+            Local_WareHouse_State := 0;
+            Local_Shuttle_State := 0;
+            Local_RotArm_State := 0;
+
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_IDLE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_SH_IDLE;
+            PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE;
+
+          ELSE
+            Current_PunchLoaded := TRUE;
+            LastInitializedPunch := 0;
+
+            WH_TargetDrawerIdx := 0;
+            WH_TargetRackID := 0;
+            WH_NeedRackBring := FALSE;
+            WH_NeedRackChange := FALSE;
+            WH_SameRack := FALSE;
+
+            WH_R_MoveRequested := FALSE;
+            WH_X_MoveRequested := FALSE;
+            WH_R_Done := FALSE;
+            WH_X_Done := FALSE;
+            WH_WaitRackInPos := FALSE;
+
+            WH_R_LoadRequested := FALSE;
+            WH_R_LoadDone := FALSE;
+            R_Not_Safety_Zone := FALSE;
+            Rack_Presence_Error := FALSE;
+
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := FALSE;
+
+            RotRequired := FALSE;
+            RotArm_RotationDone := FALSE;
+            RotArm_PunchReleased := FALSE;
+
+            Local_WareHouse_State := WareHouse_States.DL_PDrawer_pickup_start;
+            PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_L09_INIT;
+
+            Local_Shuttle_State := Shuttle_States.DL_Shuttle_starts_PPick_up;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_INIT;
+          END_IF;
+
+      ELSE
+        PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_INIT;
+      END_CASE;
+
+  ELSE
+    ;
+  END_CASE;
+
+END_IF
+
+
+(* ------------------------------------------------------------ *)
+(* Edge memory update                                            *)
+(* ------------------------------------------------------------ *)
+lastStartCmd := LoadStartCmd;

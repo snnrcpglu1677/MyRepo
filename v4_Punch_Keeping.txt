@@ -1,0 +1,53 @@
+PKeep_SH_SubState.PKSH_ANALYZE_CHECK_SWEEP:
+  FOR i := 1 TO 15 DO
+    IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+      IF MoveTypeCandidate[i] = 0 THEN
+        overlapFound := FALSE;
+
+        (* --- diğer keep punch'lara karşı kontrol --- *)
+        FOR j := 1 TO 15 DO
+          IF (j <> i) AND PunchActive[j] THEN
+
+            IF PunchDone[j] THEN
+              otherStart := NewRangeStart[j];
+              otherEnd := NewRangeEnd[j];
+            ELSE
+              otherStart := CurrentRangeStart[j];
+              otherEnd := CurrentRangeEnd[j];
+            END_IF;
+
+            IF (SweepEnd[i] > otherStart) AND (SweepStart[i] < otherEnd) THEN
+              overlapFound := TRUE;
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+
+        (* --- drag-load / diğer sabit obstacle'lara karşı kontrol --- *)
+        IF NOT overlapFound THEN
+          FOR k := 1 TO 15 DO
+            IF ObstacleActive[k] THEN
+              IF (SweepEnd[i] > ObstacleStart[k]) AND (SweepStart[i] < ObstacleEnd[k]) THEN
+                overlapFound := TRUE;
+                EXIT;
+              END_IF;
+            END_IF;
+          END_FOR;
+        END_IF;
+
+        SweepBlocked[i] := overlapFound;
+
+        IF NOT overlapFound THEN
+          MoveTypeCandidate[i] := 2; (* DIRECT_SLIDE *)
+          DirectCandidateCount := DirectCandidateCount + 1;
+          DirectCandidateIndex[DirectCandidateCount] := i;
+        ELSE
+          MoveTypeCandidate[i] := 3; (* PICK_PLACE *)
+          PickPlaceCandidateCount := PickPlaceCandidateCount + 1;
+          PickPlaceCandidateIndex[PickPlaceCandidateCount] := i;
+        END_IF;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_DECIDE_MOVE;

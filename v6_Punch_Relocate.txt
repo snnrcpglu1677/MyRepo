@@ -1,0 +1,64 @@
+PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_PFIELDS:
+  CommitOldIndex := 0;
+
+  IF Retain_RelocatePunchList[Current_PunchIndex,12] <> '' THEN
+    CommitOldIndex := STRING_TO_INT(
+      Retain_RelocatePunchList[Current_PunchIndex,12]
+    );
+  END_IF;
+
+  IF (CommitOldIndex >= 1) AND (CommitOldIndex <= 15) THEN
+
+    (* -------------------------------------------------------- *)
+    (* Güncel fiziksel konumu PFields_Old içine commit et       *)
+    (* -------------------------------------------------------- *)
+    PFields_Old[CommitOldIndex,5] :=
+      Retain_RelocatePunchList[Current_PunchIndex,5];
+
+    PFields_Old[CommitOldIndex,6] :=
+      LREAL_TO_STRING(
+        RelocateTargetZ[Current_PunchIndex] - ZOffset
+      );
+
+    PFields_Old[CommitOldIndex,10] :=
+      Retain_RelocatePunchList[Current_PunchIndex,10];
+
+    PFields_Old[CommitOldIndex,11] :=
+      Retain_RelocatePunchList[Current_PunchIndex,11];
+
+    PFields_Old[CommitOldIndex,12] :=
+      Retain_RelocatePunchList[Current_PunchIndex,12];
+
+    (* -------------------------------------------------------- *)
+    (* Retain_KeepPunchList senkronizasyonu                    *)
+    (* -------------------------------------------------------- *)
+    FOR m := 1 TO 15 DO
+
+      IF Retain_KeepPunchList[m,12] =
+         Retain_RelocatePunchList[Current_PunchIndex,12] THEN
+
+        Retain_KeepPunchList[m,5] :=
+          Retain_RelocatePunchList[Current_PunchIndex,5];
+
+        Retain_KeepPunchList[m,6] :=
+          LREAL_TO_STRING(
+            RelocateTargetZ[Current_PunchIndex] - ZOffset
+          );
+
+        Retain_KeepPunchList[m,10] :=
+          Retain_RelocatePunchList[Current_PunchIndex,10];
+
+        Retain_KeepPunchList[m,11] :=
+          Retain_RelocatePunchList[Current_PunchIndex,11];
+
+        Retain_KeepPunchList[m,12] :=
+          Retain_RelocatePunchList[Current_PunchIndex,12];
+
+        EXIT;
+      END_IF;
+
+    END_FOR;
+  END_IF;
+
+  PRelocate_SH_SubStates :=
+    PunchRelocate_SH_SubState.PRSH_COMMIT_UPDATE_RETAIN;

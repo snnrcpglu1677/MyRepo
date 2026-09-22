@@ -1,0 +1,22 @@
+Proje akışı:
+1. PunchChanger listeleri oluşturur.
+2. Punch_Unloading direct unload işlemini yapar.
+3. Punch_Relocate drag yolu açmak için keep punch'ları taşır.
+4. Punch_DraggUnload punch'ları sürükleyerek warehouse'a unload eder.
+5. Punch_DraggLoad punch'ları warehouse'dan abkant'a sürükleyerek load eder.
+6. Punch_Keeping keep punch'ları yeni programdaki final pozisyonlarına taşır.
+7. Punch_Loading kalan direct-load punch'ları yükler.
+
+Liste anlamları:
+- Retain_KeepPunchList: mevcut fiziksel keep punch verisi.
+- Retain_KeepPunchListNew: yeni programdaki keep punch hedef verisi.
+- Retain_RelocatePunchList: relocate edilecek keep punch alt listesi.
+- PFields_Old: işlem sırasındaki güncel abkant punch durumu.
+- Punch_DraggLoad tamamlandığında PFields_Old güncellenir.
+- Punch_Relocate tamamlandığında PFields_Old ve Retain_KeepPunchList senkronize edilir.
+
+Punch_Keeping kuralı:
+- Keep punch'lar Retain_KeepPunchList üzerinden işlenir.
+- Hedefler Retain_KeepPunchListNew üzerinden alınır.
+- Çakışma analizinde PFields_Old içinde bulunan, keep listesine ait olmayan dolu punch satırları da sabit obstacle olarak dikkate alınmalıdır.
+- Tamamlanmış keep punch'lar sonraki analizlerde final pozisyonlarında obstacle olarak kalmalıdır.

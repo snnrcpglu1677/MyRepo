@@ -1,0 +1,1412 @@
+FUNCTION_BLOCK Punch_Keeping
+
+VAR_INPUT
+  KeepStartCmd      : BOOL;   (* State_Machine'den gelen başlat komutu *)
+  Reset             : BOOL;   (* SOFT reset: state/substate resetlemez, sadece requestleri keser *)
+  Abort_Cycle       : BOOL;   (* HARD abort: tüm FB içi state/substate/flagleri resetler *)
+  Automatic_Page    : BOOL;   (* TRUE: otomatik sayfa aktif, FALSE: otomatik dışı -> pause zorunlu *)
+END_VAR
+
+VAR_IN_OUT
+  General_Stop      : BOOL;
+  General_Start     : BOOL;   (* Enable/pause: FALSE iken pause, TRUE iken devam *)
+END_VAR
+
+VAR_OUTPUT
+  KeepStartAck      : BOOL;   (* State_Machine'e ACK *)
+  KeepBusy          : BOOL;   (* FB aktif çalışıyor *)
+  KeepError         : BOOL;   (* hata flag *)
+  KeepDone          : BOOL;   (* tüm keep işlemleri bitti *)
+END_VAR
+
+VAR RETAIN
+  {attribute 'ac_persist':='PersistenceChannel'} Local_Shuttle_State    : INT := 0;   (* Shuttle state *)
+  {attribute 'ac_persist':='PersistenceChannel'} PKeep_SH_SubStates     : INT := 0;   (* Keep shuttle substates *)
+
+  lastStartCmd             : BOOL := FALSE;
+  initiated                : BOOL := FALSE;
+
+  Current_PunchIndex       : INT := 0;   (* seçili aktif keep punch row index 1..15 *)
+  SelectedPunchIndex       : INT := 0;   (* analiz sonucu seçilen punch *)
+  BufferPunchIndex         : INT := 0;   (* buffer'a alınan punch *)
+  KeepCount                : INT := 0;   (* aktif keep punch sayısı *)
+
+  (* Runtime punch state *)
+  PunchActive              : ARRAY[1..15] OF BOOL;
+  PunchDone                : ARRAY[1..15] OF BOOL;
+  PunchBuffered            : ARRAY[1..15] OF BOOL;
+
+  (* Source mapping *)
+  KeepOldIndex             : ARRAY[1..15] OF INT;    (* Retain_KeepPunchList[,12] *)
+  KeepNewIndex             : ARRAY[1..15] OF INT;    (* Retain_KeepPunchListNew[,12] *)
+
+  (* Attributes *)
+  KeepWidth                : ARRAY[1..15] OF LREAL;
+  KeepOldZ                 : ARRAY[1..15] OF LREAL;
+  KeepCurrentZ             : ARRAY[1..15] OF LREAL;
+  KeepNewZ                 : ARRAY[1..15] OF LREAL;
+  KeepBufferZ              : ARRAY[1..15] OF LREAL;
+
+  (* Physical ranges *)
+  OldRangeStart            : ARRAY[1..15] OF LREAL;
+  OldRangeEnd              : ARRAY[1..15] OF LREAL;
+  CurrentRangeStart        : ARRAY[1..15] OF LREAL;
+  CurrentRangeEnd          : ARRAY[1..15] OF LREAL;
+  NewRangeStart            : ARRAY[1..15] OF LREAL;
+  NewRangeEnd              : ARRAY[1..15] OF LREAL;
+  SweepStart               : ARRAY[1..15] OF LREAL;
+  SweepEnd                 : ARRAY[1..15] OF LREAL;
+
+  (* Analysis result *)
+  MoveTypeCandidate        : ARRAY[1..15] OF INT;    (* 0=NONE,1=NO_MOVE,2=DIRECT_SLIDE,3=PICK_PLACE,4=BLOCKED *)
+  TargetBlocked            : ARRAY[1..15] OF BOOL;
+  SweepBlocked             : ARRAY[1..15] OF BOOL;
+
+  (* Candidate lists *)
+  DirectCandidateIndex     : ARRAY[1..15] OF INT;
+  PickPlaceCandidateIndex  : ARRAY[1..15] OF INT;
+  BlockedCandidateIndex    : ARRAY[1..15] OF INT;
+
+  DirectCandidateCount     : INT := 0;
+  PickPlaceCandidateCount  : INT := 0;
+  BlockedCount             : INT := 0;
+  RemainingCount           : INT := 0;
+
+  (* Selected move *)
+  SelectedMoveType         : INT := 0;   (* 0=NONE, 1=DIRECT_SLIDE, 2=PICK_PLACE, 3=BUFFER *)
+  SelectedWasBufferMove    : BOOL := FALSE;
+  SelectedWasDirectSlide   : BOOL := FALSE;
+  SelectedWasPickPlace     : BOOL := FALSE;
+
+  (* Buffer *)
+  BufferRightMostEnd       : LREAL := 0.0;
+  BufferTargetZ            : LREAL := 0.0;
+
+  (* Motion helper flags *)
+  SH_DX_MoveRequested      : BOOL := FALSE;
+  SH_DX_Done               : BOOL := FALSE;
+  SH_DR_MoveRequested      : BOOL := FALSE;
+  SH_DR_Done               : BOOL := FALSE;
+  SH_Z_MoveRequested       : BOOL := FALSE;
+  SH_Z_Done                : BOOL := FALSE;
+
+  (* Clamp / pin helper *)
+  PinsReady                : BOOL := FALSE;
+  ClampReleased            : BOOL := FALSE;
+  ClampEngaged             : BOOL := FALSE;
+
+  (* Control *)
+  NeedReAnalyze            : BOOL := FALSE;
+  IterationCount           : INT := 0;
+END_VAR
+
+VAR
+  risingStart              : BOOL;
+  AutoRunEnable            : BOOL;
+  WH_Eps                   : REAL := 0.01;
+  i                        : INT;
+  j                        : INT;
+  k                        : INT;
+  a                        : INT;
+  b                        : INT;
+  c                        : INT;
+  l                        : INT;
+
+  tmpInt                   : INT;
+  tmpInt2                  : INT;
+  tmpInt3                  : INT;
+
+  DrawerIdx                : INT;
+  DrawerSlotIdx            : INT;
+  CommitOldIndex           : INT;
+  CommitNewIndex		   : INT;
+  tmpLReal                 : LREAL;
+  tmpOldZ                  : LREAL;
+  tmpCurrentZ              : LREAL;
+  tmpNewZ                  : LREAL;
+  tmpWidth                 : LREAL;
+  tmpHalfWidth             : LREAL;
+
+  testStart                : LREAL;
+  testEnd                  : LREAL;
+  otherStart               : LREAL;
+  otherEnd                 : LREAL;
+  ErrorText				   :STRING;
+  overlapFound             : BOOL;
+  candidateFound           : BOOL;
+
+  PosEps                   : LREAL := 0.01;
+  MaxIterationCount        : INT := 200;
+
+  (* Commit helper strings *)
+  CommitTargetZ            : STRING[64];
+  CommitTargetDrawer       : STRING[32];
+  CommitTargetDrawerSlot   : STRING[32];
+
+  (* Temporary cached strings from keep lists *)
+  tmpName                  : STRING[64];
+  tmpWidthStr              : STRING[32];
+  tmpRotStr                : STRING[32];
+  tmpHornStr               : STRING[32];
+  tmpDrawerStr             : STRING[32];
+  tmpDrawerSlotStr         : STRING[32];
+
+  (* Optional timers if needed later *)
+  ClampOff_Timer           : TON;
+  ClampOn_Timer            : TON;
+  KeepPosEps               : LREAL := 0.01;
+  ZOffset                  : LREAL;
+END_VAR
+
+
+(* ------------------------------------------------------------ *)
+(* Derived control *)
+(* ------------------------------------------------------------ *)
+AutoRunEnable := Automatic_Page AND General_Start AND (NOT General_Stop);
+risingStart := KeepStartCmd AND NOT lastStartCmd;
+ZOffset := REAL_TO_LREAL(Retain_ZParameters[19]);
+
+
+(* ------------------------------------------------------------ *)
+(* HARD ABORT *)
+(* ------------------------------------------------------------ *)
+IF Abort_Cycle THEN
+  KeepStartAck := FALSE;
+  KeepBusy := FALSE;
+  KeepDone := FALSE;
+  KeepError := FALSE;
+
+  Local_Shuttle_State := Shuttle_States.SH_IDLE;
+  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_IDLE;
+
+  initiated := FALSE;
+  Current_PunchIndex := 0;
+  SelectedPunchIndex := 0;
+  BufferPunchIndex := 0;
+  KeepCount := 0;
+
+  DirectCandidateCount := 0;
+  PickPlaceCandidateCount := 0;
+  BlockedCount := 0;
+  RemainingCount := 0;
+
+  SelectedMoveType := 0;
+  SelectedWasBufferMove := FALSE;
+  SelectedWasDirectSlide := FALSE;
+  SelectedWasPickPlace := FALSE;
+
+  BufferRightMostEnd := 0.0;
+  BufferTargetZ := 0.0;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  PinsReady := FALSE;
+  ClampReleased := FALSE;
+  ClampEngaged := FALSE;
+
+  NeedReAnalyze := FALSE;
+  IterationCount := 0;
+
+  FOR i := 1 TO 15 DO
+    PunchActive[i] := FALSE;
+    PunchDone[i] := FALSE;
+    PunchBuffered[i] := FALSE;
+
+    KeepOldIndex[i] := 0;
+    KeepNewIndex[i] := 0;
+
+    KeepWidth[i] := 0.0;
+    KeepOldZ[i] := 0.0;
+    KeepCurrentZ[i] := 0.0;
+    KeepNewZ[i] := 0.0;
+    KeepBufferZ[i] := 0.0;
+
+    OldRangeStart[i] := 0.0;
+    OldRangeEnd[i] := 0.0;
+    CurrentRangeStart[i] := 0.0;
+    CurrentRangeEnd[i] := 0.0;
+    NewRangeStart[i] := 0.0;
+    NewRangeEnd[i] := 0.0;
+    SweepStart[i] := 0.0;
+    SweepEnd[i] := 0.0;
+
+    MoveTypeCandidate[i] := 0;
+    TargetBlocked[i] := FALSE;
+    SweepBlocked[i] := FALSE;
+
+    DirectCandidateIndex[i] := 0;
+    PickPlaceCandidateIndex[i] := 0;
+    BlockedCandidateIndex[i] := 0;
+  END_FOR;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* SOFT RESET *)
+(* ------------------------------------------------------------ *)
+IF Reset THEN
+  KeepStartAck := FALSE;
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* START *)
+(* ------------------------------------------------------------ *)
+IF risingStart AND (NOT initiated) THEN
+  KeepStartAck := TRUE;
+  KeepBusy := TRUE;
+  KeepDone := FALSE;
+  KeepError := FALSE;
+
+  initiated := TRUE;
+  NeedReAnalyze := TRUE;
+  IterationCount := 0;
+
+  Current_PunchIndex := 0;
+  SelectedPunchIndex := 0;
+  BufferPunchIndex := 0;
+  SelectedMoveType := 0;
+
+  SelectedWasBufferMove := FALSE;
+  SelectedWasDirectSlide := FALSE;
+  SelectedWasPickPlace := FALSE;
+
+  DirectCandidateCount := 0;
+  PickPlaceCandidateCount := 0;
+  BlockedCount := 0;
+  RemainingCount := 0;
+
+  SH_DX_MoveRequested := FALSE;
+  SH_DX_Done := FALSE;
+  SH_DR_MoveRequested := FALSE;
+  SH_DR_Done := FALSE;
+  SH_Z_MoveRequested := FALSE;
+  SH_Z_Done := FALSE;
+
+  PinsReady := FALSE;
+  ClampReleased := FALSE;
+  ClampEngaged := FALSE;
+
+  KeepCount := 0;
+  FOR i := 1 TO 15 DO
+    PunchActive[i] := FALSE;
+    PunchDone[i] := FALSE;
+    PunchBuffered[i] := FALSE;
+
+    KeepOldIndex[i] := 0;
+    KeepNewIndex[i] := 0;
+
+    KeepWidth[i] := 0.0;
+    KeepOldZ[i] := 0.0;
+    KeepCurrentZ[i] := 0.0;
+    KeepNewZ[i] := 0.0;
+    KeepBufferZ[i] := 0.0;
+
+    OldRangeStart[i] := 0.0;
+    OldRangeEnd[i] := 0.0;
+    CurrentRangeStart[i] := 0.0;
+    CurrentRangeEnd[i] := 0.0;
+    NewRangeStart[i] := 0.0;
+    NewRangeEnd[i] := 0.0;
+    SweepStart[i] := 0.0;
+    SweepEnd[i] := 0.0;
+
+    MoveTypeCandidate[i] := 0;
+    TargetBlocked[i] := FALSE;
+    SweepBlocked[i] := FALSE;
+
+    DirectCandidateIndex[i] := 0;
+    PickPlaceCandidateIndex[i] := 0;
+    BlockedCandidateIndex[i] := 0;
+  END_FOR;
+
+  Local_Shuttle_State := Shuttle_States.S_KEEP_ANALYZE_NEXT_PUNCH;
+  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_INIT;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* PAUSE behaviour *)
+(* ------------------------------------------------------------ *)
+IF initiated AND (NOT AutoRunEnable) THEN
+  lastStartCmd := KeepStartCmd;
+  RETURN;
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* MAIN KEEP STATE MACHINE *)
+(* ------------------------------------------------------------ *)
+IF initiated THEN
+
+  CASE Local_Shuttle_State OF
+
+    Shuttle_States.S_KEEP_ANALYZE_NEXT_PUNCH:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_ANALYZE_INIT:
+          IF NeedReAnalyze THEN
+            KeepCount := 0;
+            FOR i := 1 TO 15 DO
+              PunchActive[i] := FALSE;
+              MoveTypeCandidate[i] := 0;
+              TargetBlocked[i] := FALSE;
+              SweepBlocked[i] := FALSE;
+              DirectCandidateIndex[i] := 0;
+              PickPlaceCandidateIndex[i] := 0;
+              BlockedCandidateIndex[i] := 0;
+
+              IF (Retain_KeepPunchList[i,3] <> '') AND (Retain_KeepPunchListNew[i,3] <> '') THEN
+                KeepCount := KeepCount + 1;
+                PunchActive[i] := TRUE;
+
+                IF Retain_KeepPunchList[i,12] <> '' THEN
+                  KeepOldIndex[i] := STRING_TO_INT(Retain_KeepPunchList[i,12]);
+                ELSE
+                  KeepOldIndex[i] := 0;
+                END_IF;
+
+                IF Retain_KeepPunchListNew[i,12] <> '' THEN
+                  KeepNewIndex[i] := STRING_TO_INT(Retain_KeepPunchListNew[i,12]);
+                ELSE
+                  KeepNewIndex[i] := 0;
+                END_IF;
+
+                IF Retain_KeepPunchList[i,7] <> '' THEN
+                  KeepWidth[i] := STRING_TO_LREAL(Retain_KeepPunchList[i,7]);
+                ELSE
+                  KeepWidth[i] := 0.0;
+                END_IF;
+
+                IF Retain_KeepPunchList[i,6] <> '' THEN
+                  KeepOldZ[i] := STRING_TO_LREAL(Retain_KeepPunchList[i,6]) + ZOffset;
+                ELSE
+                  KeepOldZ[i] := 0.0 + ZOffset;
+                END_IF;
+
+                IF KeepCurrentZ[i] = 0.0 THEN
+                  KeepCurrentZ[i] := KeepOldZ[i];
+                END_IF;
+
+                IF Retain_KeepPunchListNew[i,6] <> '' THEN
+                  KeepNewZ[i] := STRING_TO_LREAL(Retain_KeepPunchListNew[i,6]) + ZOffset;
+                ELSE
+                  KeepNewZ[i] := 0.0 + ZOffset;
+                END_IF;
+
+                tmpHalfWidth := KeepWidth[i] / 2.0;
+
+                OldRangeStart[i] := KeepOldZ[i] - tmpHalfWidth;
+                OldRangeEnd[i] := KeepOldZ[i] + tmpHalfWidth;
+
+                CurrentRangeStart[i] := KeepCurrentZ[i] - tmpHalfWidth;
+                CurrentRangeEnd[i] := KeepCurrentZ[i] + tmpHalfWidth;
+
+                NewRangeStart[i] := KeepNewZ[i] - tmpHalfWidth;
+                NewRangeEnd[i] := KeepNewZ[i] + tmpHalfWidth;
+
+                SweepStart[i] := MIN(KeepCurrentZ[i], KeepNewZ[i]) - tmpHalfWidth;
+                SweepEnd[i] := MAX(KeepCurrentZ[i], KeepNewZ[i]) + tmpHalfWidth;
+              END_IF;
+            END_FOR;
+
+            NeedReAnalyze := FALSE;
+          END_IF;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_FIND_LEFTMOST;
+
+
+        PKeep_SH_SubState.PKSH_ANALYZE_FIND_LEFTMOST:
+          DirectCandidateCount := 0;
+          PickPlaceCandidateCount := 0;
+          BlockedCount := 0;
+          RemainingCount := 0;
+
+          FOR i := 1 TO 15 DO
+            IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+              RemainingCount := RemainingCount + 1;
+              MoveTypeCandidate[i] := 0;
+              TargetBlocked[i] := FALSE;
+              SweepBlocked[i] := FALSE;
+            END_IF;
+          END_FOR;
+
+          IF RemainingCount = 0 THEN
+            Local_Shuttle_State := Shuttle_States.S_KEEP_DONE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_FINISHED;
+          ELSE
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_CHECK_TARGET;
+          END_IF;
+
+
+        PKeep_SH_SubState.PKSH_ANALYZE_CHECK_TARGET:
+          FOR i := 1 TO 15 DO
+            IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+
+              IF (ABS(CurrentRangeStart[i] - NewRangeStart[i]) <= PosEps) AND
+                 (ABS(CurrentRangeEnd[i] - NewRangeEnd[i]) <= PosEps) THEN
+                PunchDone[i] := TRUE;
+                MoveTypeCandidate[i] := 1; (* NO_MOVE *)
+              ELSE
+                overlapFound := FALSE;
+
+                FOR j := 1 TO 15 DO
+                  IF (j <> i) AND PunchActive[j] AND (NOT PunchDone[j]) THEN
+                    IF (NewRangeEnd[i] > CurrentRangeStart[j]) AND (NewRangeStart[i] < CurrentRangeEnd[j]) THEN
+                      overlapFound := TRUE;
+                      EXIT;
+                    END_IF;
+                  END_IF;
+                END_FOR;
+
+                TargetBlocked[i] := overlapFound;
+
+                IF overlapFound THEN
+                  MoveTypeCandidate[i] := 4; (* BLOCKED *)
+                  BlockedCount := BlockedCount + 1;
+                  BlockedCandidateIndex[BlockedCount] := i;
+                END_IF;
+              END_IF;
+            END_IF;
+          END_FOR;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_CHECK_SWEEP;
+
+
+        PKeep_SH_SubState.PKSH_ANALYZE_CHECK_SWEEP:
+          FOR i := 1 TO 15 DO
+            IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+              IF MoveTypeCandidate[i] = 0 THEN
+                overlapFound := FALSE;
+
+                FOR j := 1 TO 15 DO
+                  IF (j <> i) AND PunchActive[j] AND (NOT PunchDone[j]) THEN
+                    IF (SweepEnd[i] > CurrentRangeStart[j]) AND (SweepStart[i] < CurrentRangeEnd[j]) THEN
+                      overlapFound := TRUE;
+                      EXIT;
+                    END_IF;
+                  END_IF;
+                END_FOR;
+
+                SweepBlocked[i] := overlapFound;
+
+                IF NOT overlapFound THEN
+                  MoveTypeCandidate[i] := 2; (* DIRECT_SLIDE *)
+                  DirectCandidateCount := DirectCandidateCount + 1;
+                  DirectCandidateIndex[DirectCandidateCount] := i;
+                ELSE
+                  MoveTypeCandidate[i] := 3; (* PICK_PLACE *)
+                  PickPlaceCandidateCount := PickPlaceCandidateCount + 1;
+                  PickPlaceCandidateIndex[PickPlaceCandidateCount] := i;
+                END_IF;
+              END_IF;
+            END_IF;
+          END_FOR;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_DECIDE_MOVE;
+
+
+        PKeep_SH_SubState.PKSH_ANALYZE_DECIDE_MOVE:
+          SelectedPunchIndex := 0;
+          SelectedMoveType := 0;
+          SelectedWasDirectSlide := FALSE;
+          SelectedWasPickPlace := FALSE;
+          SelectedWasBufferMove := FALSE;
+
+          candidateFound := FALSE;
+          tmpLReal := 0.0;
+
+          FOR i := 1 TO DirectCandidateCount DO
+            tmpInt := DirectCandidateIndex[i];
+            IF tmpInt <> 0 THEN
+              IF NOT candidateFound THEN
+                SelectedPunchIndex := tmpInt;
+                tmpLReal := KeepCurrentZ[tmpInt];
+                candidateFound := TRUE;
+              ELSE
+                IF KeepCurrentZ[tmpInt] < tmpLReal THEN
+                  SelectedPunchIndex := tmpInt;
+                  tmpLReal := KeepCurrentZ[tmpInt];
+                END_IF;
+              END_IF;
+            END_IF;
+          END_FOR;
+
+          IF candidateFound THEN
+            SelectedMoveType := 1; (* DIRECT *)
+            Current_PunchIndex := SelectedPunchIndex;
+            SelectedWasDirectSlide := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_PREPARE_PINS_AND_SAFE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_INIT;
+          ELSE
+            candidateFound := FALSE;
+            tmpLReal := 0.0;
+
+            FOR i := 1 TO PickPlaceCandidateCount DO
+              tmpInt := PickPlaceCandidateIndex[i];
+              IF tmpInt <> 0 THEN
+                IF NOT candidateFound THEN
+                  SelectedPunchIndex := tmpInt;
+                  tmpLReal := KeepCurrentZ[tmpInt];
+                  candidateFound := TRUE;
+                ELSE
+                  IF KeepCurrentZ[tmpInt] < tmpLReal THEN
+                    SelectedPunchIndex := tmpInt;
+                    tmpLReal := KeepCurrentZ[tmpInt];
+                  END_IF;
+                END_IF;
+              END_IF;
+            END_FOR;
+
+            IF candidateFound THEN
+              SelectedMoveType := 2; (* PICK_PLACE *)
+              Current_PunchIndex := SelectedPunchIndex;
+              SelectedWasPickPlace := TRUE;
+              Local_Shuttle_State := Shuttle_States.S_KEEP_PREPARE_PINS_AND_SAFE;
+              PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_INIT;
+            ELSE
+              candidateFound := FALSE;
+              tmpLReal := 0.0;
+              BufferPunchIndex := 0;
+
+              FOR i := 1 TO 15 DO
+                IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+                  IF NOT candidateFound THEN
+                    BufferPunchIndex := i;
+                    tmpLReal := KeepCurrentZ[i];
+                    candidateFound := TRUE;
+                  ELSE
+                    IF KeepCurrentZ[i] < tmpLReal THEN
+                      BufferPunchIndex := i;
+                      tmpLReal := KeepCurrentZ[i];
+                    END_IF;
+                  END_IF;
+                END_IF;
+              END_FOR;
+
+              IF BufferPunchIndex <> 0 THEN
+                BufferRightMostEnd := 0.0;
+                candidateFound := FALSE;
+
+                FOR i := 1 TO 15 DO
+                  IF PunchActive[i] AND (NOT PunchDone[i]) THEN
+                    IF i <> BufferPunchIndex THEN
+                      IF NOT candidateFound THEN
+                        BufferRightMostEnd := CurrentRangeEnd[i];
+                        candidateFound := TRUE;
+                      ELSE
+                        IF CurrentRangeEnd[i] > BufferRightMostEnd THEN
+                          BufferRightMostEnd := CurrentRangeEnd[i];
+                        END_IF;
+                      END_IF;
+                    END_IF;
+                  END_IF;
+                END_FOR;
+
+                IF NOT candidateFound THEN
+                  BufferRightMostEnd := CurrentRangeEnd[BufferPunchIndex];
+                END_IF;
+
+                BufferTargetZ := BufferRightMostEnd + 100.0 + (KeepWidth[BufferPunchIndex] / 2.0);
+                KeepBufferZ[BufferPunchIndex] := BufferTargetZ;
+
+                SelectedPunchIndex := BufferPunchIndex;
+                Current_PunchIndex := BufferPunchIndex;
+                SelectedMoveType := 3; (* BUFFER *)
+                SelectedWasBufferMove := TRUE;
+
+                Local_Shuttle_State := Shuttle_States.S_KEEP_PREPARE_PINS_AND_SAFE;
+                PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_INIT;
+              ELSE
+                KeepError := TRUE;
+                Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+                PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+              END_IF;
+            END_IF;
+          END_IF;
+
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_PREPARE_PINS_AND_SAFE:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_PREP_INIT:
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_PIN1_CHECK_INSIDE;
+
+        PKeep_SH_SubState.PKSH_PREP_PIN1_CHECK_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_PIN2_CHECK_INSIDE;
+          ELSE
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_PIN1_INSIDE_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PREP_PIN1_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_WAIT_PIN1_INSIDE;
+
+        PKeep_SH_SubState.PKSH_PREP_WAIT_PIN1_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_PIN2_CHECK_INSIDE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PREP_PIN2_CHECK_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_DX_SAFE_REQ;
+          ELSE
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_PIN2_INSIDE_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PREP_PIN2_INSIDE_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_WAIT_PIN2_INSIDE;
+
+        PKeep_SH_SubState.PKSH_PREP_WAIT_PIN2_INSIDE:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_DX_SAFE_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PREP_DX_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_DX_SAFE_WAIT;
+
+        PKeep_SH_SubState.PKSH_PREP_DX_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PREP_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_MOVE_TO_PICK_POSITION;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PREP_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_MOVE_TO_PICK_POSITION:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_PICKPOS_INIT:
+          SH_DR_MoveRequested := FALSE;
+          SH_DR_Done := FALSE;
+          SH_Z_MoveRequested := FALSE;
+          SH_Z_Done := FALSE;
+          SH_DX_MoveRequested := FALSE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_DR_Z_REQ;
+
+        PKeep_SH_SubState.PKSH_PICKPOS_DR_Z_REQ:
+          DrawerIdx := 0;
+          IF Retain_KeepPunchList[Current_PunchIndex,10] <> '' THEN
+            DrawerIdx := STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF DrawerIdx <> 0 THEN
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam6[DrawerIdx]);
+            arAxes[EN_Axes.ATC_Z].TargetPos := KeepCurrentZ[Current_PunchIndex];
+
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+            SH_DR_MoveRequested := TRUE;
+            SH_DR_Done := FALSE;
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_DR_Z_WAIT;
+          ELSE
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICKPOS_DR_Z_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF SH_DR_Done AND SH_Z_Done THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_DX_ALIGN_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICKPOS_DX_ALIGN_REQ:
+          DrawerIdx := 0;
+          IF Retain_KeepPunchList[Current_PunchIndex,10] <> '' THEN
+            DrawerIdx := STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF DrawerIdx <> 0 THEN
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(pDrawerParam8[DrawerIdx]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_DX_ALIGN_WAIT;
+          ELSE
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICKPOS_DX_ALIGN_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICKPOS_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_PICK_PUNCH;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICKPOS_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_PICK_PUNCH:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_PICK_INIT:
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_PIN1_OUT_CMD;
+
+        PKeep_SH_SubState.PKSH_PICK_PIN1_OUT_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := TRUE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_WAIT_PIN1_OUT;
+
+        PKeep_SH_SubState.PKSH_PICK_WAIT_PIN1_OUT:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_PIN2_OUT_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICK_PIN2_OUT_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_WAIT_PIN2_OUT;
+
+        PKeep_SH_SubState.PKSH_PICK_WAIT_PIN2_OUT:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Outside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_CLAMP_OFF_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICK_CLAMP_OFF_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_WAIT_CLAMP_OFF;
+
+        PKeep_SH_SubState.PKSH_PICK_WAIT_CLAMP_OFF:
+          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PICK_DONE:
+          IF SelectedWasDirectSlide THEN
+            Local_Shuttle_State := Shuttle_States.S_KEEP_EXECUTE_DIRECT_SLIDE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_INIT;
+          ELSIF SelectedWasPickPlace THEN
+            Local_Shuttle_State := Shuttle_States.S_KEEP_EXECUTE_PICK_PLACE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_INIT;
+          ELSIF SelectedWasBufferMove THEN
+            Local_Shuttle_State := Shuttle_States.S_KEEP_EXECUTE_BUFFER_MOVE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_INIT;
+          ELSE
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          END_IF;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_EXECUTE_DIRECT_SLIDE:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_DSLIDE_INIT:
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_SET_Z_SLOW;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_SET_Z_SLOW:
+          arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity := Retain_ZParameters[2];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_REQ;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_REQ:
+          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex];
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_WAIT;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_SET_Z_NORMAL;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_SET_Z_NORMAL:
+          arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity := Retain_ZParameters[1];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_CLAMP_ON_CMD;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_WAIT_CLAMP_ON;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_PIN2_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_PIN2_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_WAIT_PIN2_IN;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_WAIT_PIN2_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_PIN1_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_PIN1_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_WAIT_PIN1_IN;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_WAIT_PIN1_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_DX_SAFE_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_DX_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_DX_SAFE_WAIT;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_DX_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_DSLIDE_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_COMMIT_RESULT;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_EXECUTE_PICK_PLACE:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_PNP_INIT:
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_SET_DR_SLOW_RETRACT;
+
+        PKeep_SH_SubState.PKSH_PNP_SET_DR_SLOW_RETRACT:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DR_RETRACT_REQ;
+
+        PKeep_SH_SubState.PKSH_PNP_DR_RETRACT_REQ:
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos - TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DR_RETRACT_WAIT;
+
+        PKeep_SH_SubState.PKSH_PNP_DR_RETRACT_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_SAFE_Z_TARGET_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_SAFE_Z_TARGET_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex];
+
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_SAFE_Z_TARGET_WAIT;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_SAFE_Z_TARGET_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF SH_DX_Done AND SH_Z_Done THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_ALIGN_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_ALIGN_REQ:
+          DrawerIdx := 0;
+          IF Retain_KeepPunchList[Current_PunchIndex,10] <> '' THEN
+            DrawerIdx := STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF DrawerIdx <> 0 THEN
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(pDrawerParam8[DrawerIdx]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_ALIGN_WAIT;
+          ELSE
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_ALIGN_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_SET_DR_SLOW_INSERT;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_SET_DR_SLOW_INSERT:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DR_INSERT_REQ;
+
+        PKeep_SH_SubState.PKSH_PNP_DR_INSERT_REQ:
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos + TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DR_INSERT_WAIT;
+
+        PKeep_SH_SubState.PKSH_PNP_DR_INSERT_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_SET_DR_NORMAL;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_SET_DR_NORMAL:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_CLAMP_ON_CMD;
+
+        PKeep_SH_SubState.PKSH_PNP_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_WAIT_CLAMP_ON;
+
+        PKeep_SH_SubState.PKSH_PNP_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_PIN2_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_PIN2_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_WAIT_PIN2_IN;
+
+        PKeep_SH_SubState.PKSH_PNP_WAIT_PIN2_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_PIN1_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_PIN1_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_WAIT_PIN1_IN;
+
+        PKeep_SH_SubState.PKSH_PNP_WAIT_PIN1_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_SAFE_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DX_SAFE_WAIT;
+
+        PKeep_SH_SubState.PKSH_PNP_DX_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_PNP_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_COMMIT_RESULT;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PNP_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_EXECUTE_BUFFER_MOVE:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_BUF_INIT:
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_SET_DR_SLOW_RETRACT;
+
+        PKeep_SH_SubState.PKSH_BUF_SET_DR_SLOW_RETRACT:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DR_RETRACT_REQ;
+
+        PKeep_SH_SubState.PKSH_BUF_DR_RETRACT_REQ:
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos - TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DR_RETRACT_WAIT;
+
+        PKeep_SH_SubState.PKSH_BUF_DR_RETRACT_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_SAFE_Z_BUFFER_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_SAFE_Z_BUFFER_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_Z].TargetPos := BufferTargetZ;
+
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_SAFE_Z_BUFFER_WAIT;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_SAFE_Z_BUFFER_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+          END_IF;
+
+          IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
+            SH_Z_MoveRequested := FALSE;
+            SH_Z_Done := TRUE;
+          END_IF;
+
+          IF SH_DX_Done AND SH_Z_Done THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_ALIGN_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_ALIGN_REQ:
+          DrawerIdx := 0;
+          IF Retain_KeepPunchList[Current_PunchIndex,10] <> '' THEN
+            DrawerIdx := STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]);
+          END_IF;
+
+          IF DrawerIdx <> 0 THEN
+            arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(pDrawerParam8[DrawerIdx]);
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+            SH_DX_MoveRequested := TRUE;
+            SH_DX_Done := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_ALIGN_WAIT;
+          ELSE
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_ALIGN_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_SET_DR_SLOW_INSERT;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_SET_DR_SLOW_INSERT:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[2];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DR_INSERT_REQ;
+
+        PKeep_SH_SubState.PKSH_BUF_DR_INSERT_REQ:
+          arAxes[EN_Axes.ATC_DR].TargetPos := arAxes[EN_Axes.ATC_DR].ActualPos + TO_LREAL(Retain_DRParameters[4]);
+          arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
+          SH_DR_MoveRequested := TRUE;
+          SH_DR_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DR_INSERT_WAIT;
+
+        PKeep_SH_SubState.PKSH_BUF_DR_INSERT_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DR].ActualPos - arAxes[EN_Axes.ATC_DR].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
+            SH_DR_MoveRequested := FALSE;
+            SH_DR_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_SET_DR_NORMAL;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_SET_DR_NORMAL:
+          arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_CLAMP_ON_CMD;
+
+        PKeep_SH_SubState.PKSH_BUF_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_WAIT_CLAMP_ON;
+
+        PKeep_SH_SubState.PKSH_BUF_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_PIN2_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_PIN2_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_WAIT_PIN2_IN;
+
+        PKeep_SH_SubState.PKSH_BUF_WAIT_PIN2_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_PIN1_IN_CMD;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_PIN1_IN_CMD:
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := TRUE;
+          Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_WAIT_PIN1_IN;
+
+        PKeep_SH_SubState.PKSH_BUF_WAIT_PIN1_IN:
+          IF Fmsc_PLC_IO.Shuttle_Pin1_Inside THEN
+            Fmsc_PLC_IO.Shuttle_Pin1_Move_Inside_Valve := FALSE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_SAFE_REQ;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_SAFE_REQ:
+          arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
+          arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
+          SH_DX_MoveRequested := TRUE;
+          SH_DX_Done := FALSE;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DX_SAFE_WAIT;
+
+        PKeep_SH_SubState.PKSH_BUF_DX_SAFE_WAIT:
+          IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
+            arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
+            SH_DX_MoveRequested := FALSE;
+            SH_DX_Done := TRUE;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_BUF_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_COMMIT_RESULT;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_BUF_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_COMMIT_RESULT:
+
+      CASE PKeep_SH_SubStates OF
+
+        PKeep_SH_SubState.PKSH_COMMIT_INIT:
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_UPDATE_PFIELDS_OLD;
+
+        PKeep_SH_SubState.PKSH_COMMIT_UPDATE_PFIELDS_OLD:
+          CommitOldIndex := 0;
+          CommitNewIndex := 0;
+
+          IF Retain_KeepPunchList[Current_PunchIndex,12] <> '' THEN
+            CommitOldIndex := STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,12]);
+          END_IF;
+
+          IF Retain_KeepPunchListNew[Current_PunchIndex,12] <> '' THEN
+            CommitNewIndex := STRING_TO_INT(Retain_KeepPunchListNew[Current_PunchIndex,12]);
+          END_IF;
+
+          IF SelectedWasBufferMove THEN
+            (* Buffer: old index satırında kalır, sadece fiziksel Z buffer pozisyonuna güncellenir *)
+            IF (CommitOldIndex >= 1) AND (CommitOldIndex <= 15) THEN
+              FOR l := 1 TO 12 DO
+                PFields_Old[CommitOldIndex, l] := Retain_KeepPunchList[Current_PunchIndex, l];
+              END_FOR;
+
+              (* Z program seviyesinde offsetsiz tutulmalı *)
+              PFields_Old[CommitOldIndex,6] := LREAL_TO_STRING(BufferTargetZ - ZOffset);
+
+              (* Drawer / Slot eski keep kaynağından korunur *)
+              PFields_Old[CommitOldIndex,10] := Retain_KeepPunchList[Current_PunchIndex,10];
+              PFields_Old[CommitOldIndex,11] := Retain_KeepPunchList[Current_PunchIndex,11];
+              PFields_Old[CommitOldIndex,12] := Retain_KeepPunchList[Current_PunchIndex,12];
+            END_IF;
+          ELSE
+            (* Direct slide / pick-place: punch finalde yeni indexte olmalı *)
+            IF (CommitOldIndex >= 1) AND (CommitOldIndex <= 15) AND
+               (CommitNewIndex >= 1) AND (CommitNewIndex <= 15) THEN
+
+              IF CommitOldIndex <> CommitNewIndex THEN
+                FOR l := 1 TO 12 DO
+                  PFields_Old[CommitOldIndex, l] := '';
+                END_FOR;
+              END_IF;
+
+              FOR l := 1 TO 12 DO
+                PFields_Old[CommitNewIndex, l] := Retain_KeepPunchListNew[Current_PunchIndex, l];
+              END_FOR;
+
+              (* Z ve new program index yeni kaynaktan *)
+              PFields_Old[CommitNewIndex,6] := Retain_KeepPunchListNew[Current_PunchIndex,6];
+              PFields_Old[CommitNewIndex,12] := Retain_KeepPunchListNew[Current_PunchIndex,12];
+
+              (* Drawer / Slot eski keep kaynağından aynen taşınır *)
+              PFields_Old[CommitNewIndex,10] := Retain_KeepPunchList[Current_PunchIndex,10];
+              PFields_Old[CommitNewIndex,11] := Retain_KeepPunchList[Current_PunchIndex,11];
+            END_IF;
+          END_IF;
+
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_MARK_RESULT;
+
+        PKeep_SH_SubState.PKSH_COMMIT_MARK_RESULT:
+          IF SelectedWasBufferMove THEN
+            PunchBuffered[Current_PunchIndex] := TRUE;
+            PunchDone[Current_PunchIndex] := FALSE;
+            KeepCurrentZ[Current_PunchIndex] := BufferTargetZ;
+
+            tmpHalfWidth := KeepWidth[Current_PunchIndex] / 2.0;
+            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] - tmpHalfWidth;
+            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpHalfWidth;
+          ELSE
+            PunchBuffered[Current_PunchIndex] := FALSE;
+            PunchDone[Current_PunchIndex] := TRUE;
+            KeepCurrentZ[Current_PunchIndex] := KeepNewZ[Current_PunchIndex];
+
+            tmpHalfWidth := KeepWidth[Current_PunchIndex] / 2.0;
+            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] - tmpHalfWidth;
+            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpHalfWidth;
+          END_IF;
+
+          SelectedWasBufferMove := FALSE;
+          SelectedWasDirectSlide := FALSE;
+          SelectedWasPickPlace := FALSE;
+          SelectedMoveType := 0;
+          Current_PunchIndex := 0;
+          SelectedPunchIndex := 0;
+
+          NeedReAnalyze := TRUE;
+          IterationCount := IterationCount + 1;
+
+          IF IterationCount > MaxIterationCount THEN
+            KeepError := TRUE;
+            Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+          ELSE
+            PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_DONE;
+          END_IF;
+
+        PKeep_SH_SubState.PKSH_COMMIT_DONE:
+          Local_Shuttle_State := Shuttle_States.S_KEEP_ANALYZE_NEXT_PUNCH;
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ANALYZE_INIT;
+
+        ELSE
+          PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_INIT;
+      END_CASE;
+
+
+
+    Shuttle_States.S_KEEP_DONE:
+      KeepBusy := FALSE;
+      KeepDone := TRUE;
+      KeepStartAck := FALSE;
+      initiated := FALSE;
+      Local_Shuttle_State := Shuttle_States.SH_IDLE;
+      PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_IDLE;
+
+
+    Shuttle_States.S_KEEP_ERROR:
+      KeepBusy := FALSE;
+      KeepDone := FALSE;
+      KeepStartAck := FALSE;
+      initiated := FALSE;
+
+
+    ELSE
+      ;
+  END_CASE;
+
+END_IF;
+
+
+(* ------------------------------------------------------------ *)
+(* Edge memory update *)
+(* ------------------------------------------------------------ *)
+lastStartCmd := KeepStartCmd;
