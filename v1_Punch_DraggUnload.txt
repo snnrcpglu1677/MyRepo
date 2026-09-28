@@ -1,5 +1,4 @@
 FUNCTION_BLOCK Punch_DraggUnload
-
 VAR_INPUT
   UnloadStartCmd      : BOOL;    (* State_Machine'den gelen başlat komutu *)
   Reset               : BOOL;    (* SOFT reset: state/substate resetlemez, sadece requestleri keser *)
@@ -20,16 +19,16 @@ VAR_OUTPUT
 END_VAR
 
 VAR RETAIN
-  {attribute 'ac_persist':='PersistenceChannel'} Local_Shuttle_State    : INT := 0;
-  {attribute 'ac_persist':='PersistenceChannel'} Local_WareHouse_State  : INT := 0;
-  {attribute 'ac_persist':='PersistenceChannel'} Local_RotArm_State     : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} Local_Shuttle_State     : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} Local_WareHouse_State   : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} Local_RotArm_State      : INT := 0;
 
-  {attribute 'ac_persist':='PersistenceChannel'} UnloadPunchCount       : INT := 0;
-  {attribute 'ac_persist':='PersistenceChannel'} DragPunchCount         : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} UnloadPunchCount        : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} DragPunchCount          : INT := 0;
 
-  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_WH_SubStates    : INT := 0;
-  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_SH_SubStates    : INT := 0;
-  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_RotArm_SubStates: INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_WH_SubStates     : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_SH_SubStates     : INT := 0;
+  {attribute 'ac_persist':='PersistenceChannel'} PDraggUnload_RotArm_SubStates : INT := 0;
 
   lastStartCmd          : BOOL := FALSE;
   initiated             : BOOL := FALSE;
@@ -72,11 +71,12 @@ VAR RETAIN
   SH_Z_MoveRequested    : BOOL := FALSE;
   SH_Z_Done             : BOOL := FALSE;
 
+  (* Rotation arm helper flags *)
+  RA_W_MoveRequested    : BOOL := FALSE;
+  RA_W_Done             : BOOL := FALSE;
   RotArm_ReadyForUnload : BOOL := FALSE;
   RotArm_RotationDone   : BOOL := FALSE;
   RotArm_PunchReleased  : BOOL := FALSE;
-  RA_W_MoveRequested    : BOOL := FALSE;
-  RA_W_Done             : BOOL := FALSE;
   RotRequired           : BOOL := FALSE;
 
   DragPrepared          : BOOL := FALSE;
@@ -96,6 +96,7 @@ VAR
   tmpHalfWidth          : LREAL;
   tmpCurrentPos         : LREAL;
   tmpSrc                : INT;
+  tmpOldIndex           : INT;
 
   PosEps                : LREAL := 0.01;
   KeepPosEps            : LREAL := 0.01;
@@ -107,22 +108,12 @@ VAR
   ClampOn_Timer         : TON;
 END_VAR
 
-
-(* ------------------------------------------------------------ *)
-(* Combined enable *)
-(* ------------------------------------------------------------ *)
 AutoRunEnable := (General_Start AND Automatic_Page);
-
 ClampOff_Timer(PT := TO_TIME(TO_INT(Retain_GeneralParameters[4] * 1000)));
 ClampOn_Timer(PT := TO_TIME(TO_INT(Retain_GeneralParameters[3] * 1000)));
-
 risingStart := (UnloadStartCmd AND NOT lastStartCmd);
 ZOffset := REAL_TO_LREAL(Retain_ZParameters[19]);
 
-
-(* ------------------------------------------------------------ *)
-(* HARD ABORT *)
-(* ------------------------------------------------------------ *)
 IF Abort_Cycle THEN
   UnloadStartAck := FALSE;
   UnloadBusy := FALSE;
@@ -136,7 +127,6 @@ IF Abort_Cycle THEN
   Current_PunchIndex := 0;
   Current_PunchLoaded := FALSE;
   LastInitializedPunch := 0;
-
   UnloadPunchCount := 0;
   DragPunchCount := 0;
 
@@ -172,14 +162,12 @@ IF Abort_Cycle THEN
   SH_Z_MoveRequested := FALSE;
   SH_Z_Done := FALSE;
 
+  RA_W_MoveRequested := FALSE;
+  RA_W_Done := FALSE;
   RotArm_ReadyForUnload := FALSE;
   RotArm_RotationDone := FALSE;
   RotArm_PunchReleased := FALSE;
-  RA_W_MoveRequested := FALSE;
-  RA_W_Done := FALSE;
   RotRequired := FALSE;
-
-  arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
 
   arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
@@ -191,10 +179,6 @@ IF Abort_Cycle THEN
   RETURN;
 END_IF
 
-
-(* ------------------------------------------------------------ *)
-(* PAUSE *)
-(* ------------------------------------------------------------ *)
 IF NOT AutoRunEnable AND NOT PLC_PRG.HMI.Drawer_Demand_Enable THEN
   arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
@@ -207,10 +191,6 @@ IF NOT AutoRunEnable AND NOT PLC_PRG.HMI.Drawer_Demand_Enable THEN
   RETURN;
 END_IF
 
-
-(* ------------------------------------------------------------ *)
-(* SOFT RESET *)
-(* ------------------------------------------------------------ *)
 IF Reset THEN
   arAxes[EN_Axes.ATC_R].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_X].AxisTravelRequestAbs := FALSE;
@@ -220,10 +200,6 @@ IF Reset THEN
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
 END_IF
 
-
-(* ------------------------------------------------------------ *)
-(* START + DRAG LIST PREPARATION *)
-(* ------------------------------------------------------------ *)
 IF risingStart THEN
   initiated := TRUE;
   UnloadBusy := TRUE;
@@ -241,34 +217,31 @@ IF risingStart THEN
     DragOrderUsed[i] := FALSE;
   END_FOR;
 
-  (* Count all unload candidates *)
   FOR i := 1 TO 15 DO
     IF (Retain_UnloadPunchList[i,3] <> '') THEN
       UnloadPunchCount := UnloadPunchCount + 1;
     END_IF;
   END_FOR;
 
-  (* Build drag source list from unload list *)
   FOR i := 1 TO 15 DO
     IF (Retain_UnloadPunchList[i,3] <> '') AND (Retain_UnloadPunchList[i,2] = '1') THEN
       DragPunchCount := DragPunchCount + 1;
       DragSrcIndex[DragPunchCount] := i;
 
-      IF Retain_UnloadPunchList[i,12] <> '' THEN
-        DragDrawerNo[DragPunchCount] := STRING_TO_INT(Retain_UnloadPunchList[i,12]);
+      IF Retain_ATCUnloadPunchList[i,2] <> '' THEN
+        DragDrawerNo[DragPunchCount] := STRING_TO_INT(Retain_ATCUnloadPunchList[i,2]);
       ELSE
         DragDrawerNo[DragPunchCount] := 0;
       END_IF;
 
-      IF Retain_UnloadPunchList[i,11] <> '' THEN
-        DragSlotNo[DragPunchCount] := STRING_TO_INT(Retain_UnloadPunchList[i,11]);
+      IF Retain_ATCUnloadPunchList[i,3] <> '' THEN
+        DragSlotNo[DragPunchCount] := STRING_TO_INT(Retain_ATCUnloadPunchList[i,3]);
       ELSE
         DragSlotNo[DragPunchCount] := 0;
       END_IF;
     END_IF;
   END_FOR;
 
-  (* Sort by drawer no, then slot no ascending *)
   FOR i := 1 TO DragPunchCount - 1 DO
     FOR j := i + 1 TO DragPunchCount DO
       IF (DragDrawerNo[j] < DragDrawerNo[i]) OR
@@ -286,13 +259,11 @@ IF risingStart THEN
         DragSlotNo[i] := DragSlotNo[j];
         DragSlotNo[j] := tmpInt;
       END_IF;
-    END_IF;
+    END_FOR;
   END_FOR;
 
-  (* Copy to drag lists *)
   FOR i := 1 TO DragPunchCount DO
     tmpSrc := DragSrcIndex[i];
-
     FOR k := 1 TO 12 DO
       Retain_DragPunchList[i,k] := Retain_UnloadPunchList[tmpSrc,k];
       Retain_ATCDragPunchList[i,k] := Retain_ATCUnloadPunchList[tmpSrc,k];
@@ -321,7 +292,6 @@ IF risingStart THEN
     Local_Shuttle_State := Shuttle_States.PRG_Proccesing;
     Local_WareHouse_State := WareHouse_States.PRG_Proccesing;
     Local_RotArm_State := RotationArm_States.U_RotArm_Init_And_Home;
-
     PDraggUnload_SH_SubStates := PDraggUnload_SH_SubState.PUNLDRG_U26_INIT;
     PDraggUnload_WH_SubStates := PDraggUnload_WH_SubState.PUNLDRG_U14_INIT;
     PDraggUnload_RotArm_SubStates := PDraggUnload_RotArm_SubState.ROT_INIT_CHECK_POSITION;
@@ -330,16 +300,8 @@ IF risingStart THEN
   UnloadStartAck := TRUE;
 END_IF
 
-
-(* ------------------------------------------------------------ *)
-(* MAIN ENGINE STATES - to be continued in next step *)
-(* ------------------------------------------------------------ *)
 IF initiated AND DragPrepared THEN
   (* Shuttle / Warehouse / RotationArm parallel engine flow will continue here *)
 END_IF
 
-
-(* ------------------------------------------------------------ *)
-(* Edge memory update *)
-(* ------------------------------------------------------------ *)
 lastStartCmd := UnloadStartCmd;
