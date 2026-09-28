@@ -43,7 +43,7 @@ VAR RETAIN
   DragSlotNo            : ARRAY[1..15] OF INT;
   DragOrderUsed         : ARRAY[1..15] OF BOOL;
 
-  (* Warehouse state helper flags *)
+  (* Warehouse helper flags *)
   WH_TargetDrawerIdx    : INT := 0;
   WH_TargetRackID       : INT := 0;
   WH_NeedRackBring      : BOOL := FALSE;
@@ -175,7 +175,6 @@ IF Abort_Cycle THEN
   arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
-
   RETURN;
 END_IF
 
@@ -186,7 +185,6 @@ IF NOT AutoRunEnable AND NOT PLC_PRG.HMI.Drawer_Demand_Enable THEN
   arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
-
   lastStartCmd := UnloadStartCmd;
   RETURN;
 END_IF
@@ -228,14 +226,14 @@ IF risingStart THEN
       DragPunchCount := DragPunchCount + 1;
       DragSrcIndex[DragPunchCount] := i;
 
-      IF Retain_ATCUnloadPunchList[i,2] <> '' THEN
-        DragDrawerNo[DragPunchCount] := STRING_TO_INT(Retain_ATCUnloadPunchList[i,2]);
+      IF Retain_UnloadPunchList[i,10] <> '' THEN
+        DragDrawerNo[DragPunchCount] := STRING_TO_INT(Retain_UnloadPunchList[i,10]);
       ELSE
         DragDrawerNo[DragPunchCount] := 0;
       END_IF;
 
-      IF Retain_ATCUnloadPunchList[i,3] <> '' THEN
-        DragSlotNo[DragPunchCount] := STRING_TO_INT(Retain_ATCUnloadPunchList[i,3]);
+      IF Retain_UnloadPunchList[i,11] <> '' THEN
+        DragSlotNo[DragPunchCount] := STRING_TO_INT(Retain_UnloadPunchList[i,11]);
       ELSE
         DragSlotNo[DragPunchCount] := 0;
       END_IF;
@@ -275,11 +273,9 @@ IF risingStart THEN
     Current_PunchLoaded := FALSE;
     UnloadDone := TRUE;
     initiated := FALSE;
-
     Local_WareHouse_State := 0;
     Local_Shuttle_State := 0;
     Local_RotArm_State := 0;
-
     PDraggUnload_WH_SubStates := PDraggUnload_WH_SubState.PUNLDRG_IDLE;
     PDraggUnload_SH_SubStates := PDraggUnload_SH_SubState.SH_IDLE;
     PDraggUnload_RotArm_SubStates := PDraggUnload_RotArm_SubState.ROT_IDLE;
@@ -288,7 +284,6 @@ IF risingStart THEN
     Current_PunchLoaded := FALSE;
     UnloadDone := FALSE;
     DragPrepared := TRUE;
-
     Local_Shuttle_State := Shuttle_States.PRG_Proccesing;
     Local_WareHouse_State := WareHouse_States.PRG_Proccesing;
     Local_RotArm_State := RotationArm_States.U_RotArm_Init_And_Home;
