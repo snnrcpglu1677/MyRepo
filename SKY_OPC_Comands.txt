@@ -147,7 +147,12 @@ ELSE
         Press_Prepare.PP_SET_AKAS_PISTON_UP:
             FMSC_PLC_IO.Akas_Piston_Up_Valve := TRUE;
             FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
-            CurrentState := Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH;
+            CurrentState := Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION;
+
+        Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION:
+            IF FMSC_PLC_IO.Akas_Piston_Up_Position THEN
+                CurrentState := Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH;
+            END_IF;
 
 
         Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH:
