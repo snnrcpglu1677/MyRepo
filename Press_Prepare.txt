@@ -1,0 +1,32 @@
+{attribute 'qualified_only'}
+{attribute 'strict'}
+TYPE Press_Prepare :
+(
+ 	PP_IDLE := 0,
+    PP_START_PREPARE := 1,
+
+    PP_CLEAR_PRODUCT_COMMAND := 2,
+    PP_WAIT_PRODUCT_COMMAND_CLEARED := 3,
+    PP_SET_PRODUCT_COMMAND := 4,
+    PP_WAIT_PRODUCT_SELECTED := 5,
+
+    PP_SET_MANUAL_MODE := 6,
+    PP_WAIT_MANUAL_MODE := 7,
+
+    PP_SET_PRESS_WAIT_LDP := 8,
+
+    PP_RUN_KEY_PRESS := 9,
+    PP_WAIT_RUN_KEY_PRESS := 10,
+
+    PP_RUN_KEY_RELEASE := 11,
+    PP_WAIT_RUN_KEY_RELEASE := 12,
+
+    PP_SET_PRESS_DOWN := 13,
+    PP_WAIT_PRESS_DOWN_COMPLETE := 14,
+
+    PP_SET_AKAS_PISTON_UP := 15,
+    PP_WAIT_ATC_CYCLE_FINISH := 16,
+
+    PP_DONE := 17
+);
+END_TYPE
