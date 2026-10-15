@@ -1,0 +1,171 @@
+FUNCTION_BLOCK SKY_OPC_Comands
+VAR_INPUT
+    Prepare_Press : BOOL;
+    Abort_Cycle : BOOL;
+
+    Machine_StatesModes : DINT;                          //1:Edit 2:Manual 3:Semi 4:Auto
+    Status_Machine_HydraulicMotorRunningState : DINT;    //1:Passive 2:Active
+    Status_Machine_KeyRun : DINT;                        //1=bırak, 2=bas
+    Status_Machine_KeyStop : DINT;                       //1=bırak, 2=bas
+    Status_Machine_ExtraFunction : DINT;                 //1=IndexPageOpen, 3=MenuPageOpened
+    Status_Machine_Indexed : BOOL;
+    Status_Machine_Clamped : BOOL;
+    Status_Product_ProductName : STRING;
+	Status_Machine_MovementStates:DINT;
+	ATC_Cycle_Finish:BOOL; 
+END_VAR
+
+VAR_OUTPUT
+    Command_Machine_StatesModes : DINT;                  //1:Edit 2:Manual 3:Semi 4:Auto
+    Command_Machine_KeyRun : DINT;                       //1=bırak, 2=bas
+    Command_Machine_KeyStop : DINT;                      //1=bırak, 2=bas
+    Command_Machine_ExtraFunction : DINT;                //1=IndexPageOpen, 3=MenuPageOpened
+    Press_Ready : BOOL;
+END_VAR
+
+VAR
+    CurrentState : Press_Prepare := Press_Prepare.PP_IDLE;
+    lastPreparePress : BOOL := FALSE;
+    preparePressRising : BOOL := FALSE;
+	DownCommand_Delay           : TON;
+END_VAR
+preparePressRising := Prepare_Press AND NOT lastPreparePress;
+DownCommand_Delay(PT:=TO_TIME(2500));
+IF Abort_Cycle THEN
+
+    CurrentState := Press_Prepare.PP_IDLE;
+    Press_Ready := FALSE;
+    DownCommand_Delay.IN:=FALSE;
+    Command_Machine_StatesModes := 0;
+    Command_Machine_KeyRun := 1;
+    Command_Machine_KeyStop := 1;
+    Command_Machine_ExtraFunction := 0;
+
+    FMSC_PLC_IO.Akas_Piston_Up_Valve := FALSE;
+    FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
+    FMSC_PLC_IO.Press_Wait_LDP_Comand := FALSE;
+    FMSC_PLC_IO.Press_Down_Comand := FALSE;
+
+ELSE
+
+    CASE CurrentState OF
+
+        Press_Prepare.PP_IDLE:
+            Press_Ready := FALSE;
+
+            Command_Machine_KeyRun := 1;
+            Command_Machine_KeyStop := 1;
+
+            IF preparePressRising AND
+               (Status_Machine_HydraulicMotorRunningState = 2) AND
+               (Status_Machine_Indexed = TRUE) THEN
+                CurrentState := Press_Prepare.PP_START_PREPARE;
+            END_IF;
+
+
+        Press_Prepare.PP_START_PREPARE:
+            FMSC_PLC_IO.Akas_Piston_Up_Valve := FALSE;
+            FMSC_PLC_IO.Akas_Piston_Down_Valve := TRUE;
+            CurrentState := Press_Prepare.PP_CLEAR_PRODUCT_COMMAND;
+
+
+        Press_Prepare.PP_CLEAR_PRODUCT_COMMAND:
+            Command_Product_ProductName := '';
+            CurrentState := Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED;
+
+
+        Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED:
+            IF Status_Product_ProductName = '' THEN
+                CurrentState := Press_Prepare.PP_SET_PRODUCT_COMMAND;
+            END_IF;
+
+
+        Press_Prepare.PP_SET_PRODUCT_COMMAND:
+            Command_Product_ProductName := 'ATC_Pre';
+            CurrentState := Press_Prepare.PP_WAIT_PRODUCT_SELECTED;
+
+
+        Press_Prepare.PP_WAIT_PRODUCT_SELECTED:
+            IF Status_Product_ProductName = Command_Product_ProductName THEN
+                CurrentState := Press_Prepare.PP_SET_MANUAL_MODE;
+            END_IF;
+
+
+        Press_Prepare.PP_SET_MANUAL_MODE:
+            Command_Machine_StatesModes := 4;
+            CurrentState := Press_Prepare.PP_WAIT_MANUAL_MODE;
+
+
+        Press_Prepare.PP_WAIT_MANUAL_MODE:
+            IF Machine_StatesModes = 4 THEN
+                CurrentState := Press_Prepare.PP_SET_PRESS_WAIT_LDP;
+            END_IF;
+
+
+        Press_Prepare.PP_SET_PRESS_WAIT_LDP:
+            FMSC_PLC_IO.Press_Wait_LDP_Comand := TRUE;
+            CurrentState := Press_Prepare.PP_RUN_KEY_PRESS;
+
+
+        Press_Prepare.PP_RUN_KEY_PRESS:
+            Command_Machine_KeyRun := 2;
+            CurrentState := Press_Prepare.PP_WAIT_RUN_KEY_PRESS;
+
+
+        Press_Prepare.PP_WAIT_RUN_KEY_PRESS:
+            IF Status_Machine_KeyRun = 2 THEN
+                CurrentState := Press_Prepare.PP_RUN_KEY_RELEASE;
+            END_IF;
+
+
+        Press_Prepare.PP_RUN_KEY_RELEASE:
+            Command_Machine_KeyRun := 2;
+            CurrentState := Press_Prepare.PP_WAIT_RUN_KEY_RELEASE;
+
+
+        Press_Prepare.PP_WAIT_RUN_KEY_RELEASE:
+            IF Status_Machine_KeyRun = 2 THEN
+                CurrentState := Press_Prepare.PP_SET_PRESS_DOWN;
+            END_IF;
+
+
+        Press_Prepare.PP_SET_PRESS_DOWN:
+			DownCommand_Delay.IN:=TRUE;
+			IF DownCommand_Delay.Q THEN 
+				 FMSC_PLC_IO.Press_Down_Comand := TRUE;
+				 CurrentState := Press_Prepare.PP_WAIT_PRESS_DOWN_COMPLETE;
+			END_IF
+
+
+        Press_Prepare.PP_WAIT_PRESS_DOWN_COMPLETE:
+				DownCommand_Delay.IN:=FALSE;
+            IF Status_Machine_MovementStates = 4 THEN
+                CurrentState := Press_Prepare.PP_SET_AKAS_PISTON_UP;
+            END_IF;
+
+
+        Press_Prepare.PP_SET_AKAS_PISTON_UP:
+            FMSC_PLC_IO.Akas_Piston_Up_Valve := TRUE;
+            FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
+            CurrentState := Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH;
+
+
+        Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH:
+            Press_Ready := TRUE;
+
+            IF ATC_Cycle_Finish THEN
+                CurrentState := Press_Prepare.PP_DONE;
+            END_IF;
+
+
+        Press_Prepare.PP_DONE:
+            Press_Ready := TRUE;
+            IF NOT Prepare_Press THEN
+                CurrentState := Press_Prepare.PP_IDLE;
+            END_IF;
+
+    END_CASE;
+
+END_IF;
+
+lastPreparePress := Prepare_Press;
