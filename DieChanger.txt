@@ -1,0 +1,982 @@
+FUNCTION_BLOCK DieChanger
+VAR_INPUT
+	Trigger : BOOL;
+	Unload  : BOOL;
+	Abbort  : BOOL;
+END_VAR
+VAR_OUTPUT RETAIN
+  ValidityFlag   : BOOL;
+  PerIndexStatus : ARRAY[1..15] OF PIndexStatus;
+  PackageState   : PPackageState;
+  NextActionHint : PNextActionHint;
+
+  numSame  : INT;
+  numDiff  : INT;
+  newCount : INT;
+  oldCount : INT;
+
+  ErrorText : STRING(200);
+
+  Error : BOOL;
+  Busy  : BOOL;
+  Done  : BOOL;
+END_VAR
+VAR RETAIN
+  i : INT;
+  j : INT;
+  k : INT;
+  assigned : BOOL;
+  foundIndex : INT;
+
+  usedSlot : ARRAY[1..20, 1..15] OF BOOL;
+  OldAssignedDrawer : ARRAY[1..15] OF INT;
+  OldAssignedSlot   : ARRAY[1..15] OF INT;
+
+  NewAssignedDrawer : ARRAY[1..15] OF INT;
+  NewAssignedSlot   : ARRAY[1..15] OF INT;
+  origNewIdx : INT;
+
+  NewName : STRING(100);
+  OldName : STRING(100);
+  NewLen  : STRING(100);
+  NewLenReal : REAL;
+  OldLen  : STRING(100);
+  OldLenReal : REAL;
+
+  eps : REAL := 0.001;
+
+  foundLengthMatch : BOOL;
+  hasLengthValue   : BOOL;
+
+  KeepList       : ARRAY[1..15] OF BOOL;
+  ReplaceList    : ARRAY[1..15] OF BOOL;
+  LoadOnlyList   : ARRAY[1..15] OF BOOL;
+  UnloadOnlyList : ARRAY[1..15] OF BOOL;
+  OldMatched     : ARRAY[1..15] OF BOOL;
+  NewMatchedToOld : ARRAY[1..15] OF INT;
+
+  (* Temporary arrays for ordered packing *)
+  UnloadTempCount     : INT;
+  UnloadTempOrigIndex : ARRAY[1..15] OF INT;
+  UnloadTempDrawerIdx : ARRAY[1..15] OF INT;
+  UnloadTempOrder     : ARRAY[1..15] OF INT;
+
+  LoadTempCount     : INT;
+  LoadTempOrigIndex : ARRAY[1..15] OF INT;
+  LoadTempDrawerIdx : ARRAY[1..15] OF INT;
+  LoadTempOrder     : ARRAY[1..15] OF INT;
+
+  KeepTempCount     : INT;
+  KeepTempOrigIndex : ARRAY[1..15] OF INT;
+  KeepTempDrawerIdx : ARRAY[1..15] OF INT;
+  KeepTempOrder     : ARRAY[1..15] OF INT;
+
+  a : INT;
+  b : INT;
+  minIdx : INT;
+  tmpInt : INT;
+
+  (* Consume-old matching helpers *)
+  OldAvailCount : INT;
+  OldAvailIndex : ARRAY[1..15] OF INT;
+
+  (* ATC mapping iterators/temps *)
+  c : INT;
+  d : INT;
+  e : INT;
+  m : INT;
+  UnloadCount : INT;
+  LoadCount   : INT;
+  KeepCount   : INT;
+  lenStr : STRING(100);
+  posStr : STRING(100);
+  lenRealLocal : REAL;
+
+  (* multiplicity check temps *)
+  neededCount : INT;
+  availCount  : INT;
+  skipTriple  : BOOL := FALSE;
+  uniqCount   : INT;
+  uniqName    : ARRAY[1..15] OF STRING(100);
+  uniqLen     : ARRAY[1..15] OF STRING(100);
+  uniqNeeded  : ARRAY[1..15] OF INT;
+END_VAR
+VAR
+	eTmp : INT;
+	dTmp : INT;
+END_VAR
+(* Abort clears generated lists and transient state, but preserves DFields and
+   DFields_Old as the requested and physical die records. *)
+IF Abbort THEN
+  Busy := FALSE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+  ValidityFlag := FALSE;
+  PackageState := PPackageState.INVALID;
+  NextActionHint := PNextActionHint.INVALID_ABORT;
+
+  numSame := 0;
+  numDiff := 0;
+  newCount := 0;
+  oldCount := 0;
+  UnloadCount := 0;
+  LoadCount := 0;
+  KeepCount := 0;
+  UnloadTempCount := 0;
+  LoadTempCount := 0;
+  KeepTempCount := 0;
+  OldAvailCount := 0;
+  uniqCount := 0;
+  availCount := 0;
+  neededCount := 0;
+
+  assigned := FALSE;
+  foundIndex := 0;
+  origNewIdx := 0;
+  minIdx := 0;
+  tmpInt := 0;
+  NewName := '';
+  OldName := '';
+  NewLen := '';
+  OldLen := '';
+  lenStr := '';
+  posStr := '';
+  NewLenReal := 0.0;
+  OldLenReal := 0.0;
+  lenRealLocal := 0.0;
+  foundLengthMatch := FALSE;
+  hasLengthValue := FALSE;
+  skipTriple := FALSE;
+
+  FOR i := 1 TO 15 DO
+    PerIndexStatus[i] := PIndexStatus.SAME;
+    KeepList[i] := FALSE;
+    ReplaceList[i] := FALSE;
+    LoadOnlyList[i] := FALSE;
+    UnloadOnlyList[i] := FALSE;
+    OldMatched[i] := FALSE;
+    NewMatchedToOld[i] := 0;
+    OldAssignedDrawer[i] := 0;
+    OldAssignedSlot[i] := 0;
+    NewAssignedDrawer[i] := 0;
+    NewAssignedSlot[i] := 0;
+    UnloadTempOrigIndex[i] := 0;
+    UnloadTempDrawerIdx[i] := 0;
+    UnloadTempOrder[i] := 0;
+    LoadTempOrigIndex[i] := 0;
+    LoadTempDrawerIdx[i] := 0;
+    LoadTempOrder[i] := 0;
+    KeepTempOrigIndex[i] := 0;
+    KeepTempDrawerIdx[i] := 0;
+    KeepTempOrder[i] := 0;
+    OldAvailIndex[i] := 0;
+    uniqName[i] := '';
+    uniqLen[i] := '';
+    uniqNeeded[i] := 0;
+  END_FOR;
+
+  FOR e := 1 TO 20 DO
+    FOR d := 1 TO 15 DO
+      usedSlot[e,d] := FALSE;
+    END_FOR;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_UnloadDieList[i,j] := '';
+      Retain_ATCUnloadDieList[i,j] := '';
+      Retain_LoadDieList[i,j] := '';
+      Retain_ATCLoadDieList[i,j] := '';
+      Retain_KeepDieList[i,j] := '';
+      Retain_KeepDieListNew[i,j] := '';
+    END_FOR;
+  END_FOR;
+
+  RETURN;
+END_IF;
+
+(* Main execution: run on rising edge of Trigger or Unload *)
+IF Unload THEN
+  (* initialize *)
+  Busy := TRUE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+  ValidityFlag := TRUE;
+
+  numSame := 0;
+  numDiff := 0;
+  newCount := 0;
+  oldCount := 0;
+
+  FOR i := 1 TO 15 DO
+    KeepList[i] := FALSE;
+    ReplaceList[i] := FALSE;
+    LoadOnlyList[i] := FALSE;
+    UnloadOnlyList[i] := FALSE;
+    PerIndexStatus[i] := PIndexStatus.SAME;
+    OldMatched[i] := FALSE;
+    NewMatchedToOld[i] := 0;
+  END_FOR;
+
+  (* Clear all target global retain arrays before packing *)
+  FOR i := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_UnloadDieList[i,j] := '';
+      Retain_ATCUnloadDieList[i,j] := '';
+      Retain_LoadDieList[i,j] := '';
+      Retain_ATCLoadDieList[i,j] := '';
+      Retain_KeepDieList[i,j] := '';
+      Retain_KeepDieListNew[i,j] := '';
+    END_FOR;
+  END_FOR;
+
+  (* Build unload candidates only from current physical state DFields_Old *)
+  UnloadTempCount := 0;
+  FOR i := 1 TO 15 DO
+    IF DFields_Old[i,3] <> '' THEN
+      oldCount := oldCount + 1;
+      UnloadOnlyList[i] := TRUE;
+
+      foundIndex := 0;
+      FOR k := 1 TO 20 DO
+        IF DDrawerName[k] = DFields_Old[i,3] THEN
+          foundIndex := k;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF foundIndex <> 0 THEN
+        UnloadTempCount := UnloadTempCount + 1;
+        UnloadTempOrigIndex[UnloadTempCount] := i;
+        UnloadTempDrawerIdx[UnloadTempCount] := foundIndex;
+        UnloadTempOrder[UnloadTempCount] := UnloadTempCount;
+      END_IF;
+
+      PerIndexStatus[i] := PIndexStatus.DIFF;
+    ELSE
+      PerIndexStatus[i] := PIndexStatus.SAME;
+    END_IF;
+  END_FOR;
+
+  numSame := 0;
+  numDiff := oldCount;
+  newCount := 0;
+
+  FOR a := 1 TO UnloadTempCount - 1 DO
+    minIdx := a;
+    FOR b := a + 1 TO UnloadTempCount DO
+      IF UnloadTempDrawerIdx[b] < UnloadTempDrawerIdx[minIdx] THEN
+        minIdx := b;
+      ELSIF (UnloadTempDrawerIdx[b] = UnloadTempDrawerIdx[minIdx]) AND (UnloadTempOrder[b] < UnloadTempOrder[minIdx]) THEN
+        minIdx := b;
+      END_IF;
+    END_FOR;
+
+    IF minIdx <> a THEN
+      tmpInt := UnloadTempOrigIndex[a];
+      UnloadTempOrigIndex[a] := UnloadTempOrigIndex[minIdx];
+      UnloadTempOrigIndex[minIdx] := tmpInt;
+
+      tmpInt := UnloadTempDrawerIdx[a];
+      UnloadTempDrawerIdx[a] := UnloadTempDrawerIdx[minIdx];
+      UnloadTempDrawerIdx[minIdx] := tmpInt;
+
+      tmpInt := UnloadTempOrder[a];
+      UnloadTempOrder[a] := UnloadTempOrder[minIdx];
+      UnloadTempOrder[minIdx] := tmpInt;
+    END_IF;
+  END_FOR;
+
+  UnloadCount := 0;
+  FOR a := 1 TO UnloadTempCount DO
+    UnloadCount := UnloadCount + 1;
+    i := UnloadTempOrigIndex[a];
+    FOR j := 1 TO 12 DO
+      Retain_UnloadDieList[UnloadCount, j] := DFields_Old[i, j];
+    END_FOR;
+    Retain_UnloadDieList[UnloadCount, 12] := INT_TO_STRING(i);
+  END_FOR;
+
+  FOR c := 1 TO 15 DO
+    FOR j := 1 TO 12 DO
+      Retain_ATCUnloadDieList[c, j] := '';
+    END_FOR;
+  END_FOR;
+
+  FOR c := 1 TO UnloadCount DO
+    tmpInt := UnloadTempOrigIndex[c];
+
+    IF (tmpInt >= 1) AND (tmpInt <= 15) AND (DFields_Old[tmpInt,10] <> '') AND (DFields_Old[tmpInt,11] <> '') THEN
+      e := STRING_TO_INT(DFields_Old[tmpInt,10]);
+      d := STRING_TO_INT(DFields_Old[tmpInt,11]);
+
+      IF (e >= 1) AND (e <= 20) AND (d >= 1) AND (d <= 15) THEN
+        Retain_ATCUnloadDieList[c,1] := DDrawerName[e];
+        Retain_ATCUnloadDieList[c,2] := DFields_Old[tmpInt,10];
+        Retain_ATCUnloadDieList[c,3] := DFields_Old[tmpInt,11];
+        Retain_ATCUnloadDieList[c,4] := REAL_TO_STRING(DieLength[e,d]);
+        Retain_ATCUnloadDieList[c,5] := REAL_TO_STRING(DiePosition[e,d]);
+        Retain_ATCUnloadDieList[c,12] := INT_TO_STRING(tmpInt);
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  PackageState := PPackageState.PARTIAL_CHANGE;
+  NextActionHint := PNextActionHint.NO_ACTION;
+  ValidityFlag := TRUE;
+
+  Busy := FALSE;
+  Done := TRUE;
+
+ELSIF Trigger THEN
+  (* initialize *)
+  Busy := TRUE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+  ValidityFlag := TRUE;
+
+  numSame := 0;
+  numDiff := 0;
+  newCount := 0;
+  oldCount := 0;
+
+  FOR i := 1 TO 15 DO
+    KeepList[i] := FALSE;
+    ReplaceList[i] := FALSE;
+    LoadOnlyList[i] := FALSE;
+    UnloadOnlyList[i] := FALSE;
+    PerIndexStatus[i] := PIndexStatus.SAME;
+    OldMatched[i] := FALSE;
+    NewMatchedToOld[i] := 0;
+  END_FOR;
+
+  (* STEP 1: basic ATC existence + requested length presence check for all requested new entries *)
+  FOR i := 1 TO 15 DO
+    NewName := DFields[i,3];
+
+    IF NewName <> '' THEN
+      newCount := newCount + 1;
+      NewLen := DFields[i,7];
+
+      foundIndex := 0;
+      FOR j := 1 TO 20 DO
+        IF DDrawerName[j] = NewName THEN
+          foundIndex := j;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF foundIndex = 0 THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: missing ATC die name: ', NewName);
+
+        FOR i := 1 TO 15 DO
+          FOR j := 1 TO 12 DO
+            DFields[i,j] := '';
+          END_FOR;
+        END_FOR;
+
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+
+      IF NewLen = '' THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: missing length for die: ', NewName);
+
+        FOR i := 1 TO 15 DO
+          FOR j := 1 TO 12 DO
+            DFields[i,j] := '';
+          END_FOR;
+        END_FOR;
+
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+
+      foundLengthMatch := FALSE;
+      hasLengthValue := FALSE;
+      NewLenReal := 0.0;
+
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+        hasLengthValue := TRUE;
+      END_IF;
+
+      IF hasLengthValue THEN
+        FOR j := 1 TO 20 DO
+          IF DDrawerName[j] = NewName THEN
+            FOR k := 1 TO 15 DO
+              IF ABS(DieLength[j, k] - NewLenReal) <= eps THEN
+                foundLengthMatch := TRUE;
+                EXIT;
+              END_IF;
+            END_FOR;
+
+            IF foundLengthMatch THEN
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+
+      IF NOT foundLengthMatch THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: requested die length NOT found FOR die: ', NewName);
+
+        FOR i := 1 TO 15 DO
+          FOR j := 1 TO 12 DO
+            DFields[i,j] := '';
+          END_FOR;
+        END_FOR;
+
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  (* STEP 2: Deterministic one-to-one keep matching (consume-old approach) *)
+  OldAvailCount := 0;
+  FOR j := 1 TO 15 DO
+    OldName := DFields_Old[j,3];
+    IF OldName <> '' THEN
+      OldAvailCount := OldAvailCount + 1;
+      OldAvailIndex[OldAvailCount] := j;
+      OldMatched[j] := FALSE;
+      oldCount := oldCount + 1;
+    ELSE
+      OldMatched[j] := FALSE;
+    END_IF;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    NewName := DFields[i,3];
+    IF NewName <> '' THEN
+      NewLen := DFields[i,7];
+      NewLenReal := 0.0;
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+      END_IF;
+
+      NewMatchedToOld[i] := 0;
+      a := 1;
+      WHILE (a <= OldAvailCount) AND (NewMatchedToOld[i] = 0) DO
+        j := OldAvailIndex[a];
+        OldName := DFields_Old[j,3];
+        IF OldName <> '' THEN
+          OldLen := DFields_Old[j,7];
+
+          OldLenReal := 0.0;
+          IF OldLen <> '' THEN
+            OldLenReal := STRING_TO_REAL(OldLen);
+          END_IF;
+
+          IF (NewName = OldName) AND (ABS(NewLenReal - OldLenReal) <= eps) THEN
+            OldMatched[j] := TRUE;
+            KeepList[j] := TRUE;
+            NewMatchedToOld[i] := j;
+
+            FOR b := a TO OldAvailCount - 1 DO
+              OldAvailIndex[b] := OldAvailIndex[b + 1];
+            END_FOR;
+            OldAvailCount := OldAvailCount - 1;
+          ELSE
+            a := a + 1;
+          END_IF;
+        ELSE
+          a := a + 1;
+        END_IF;
+      END_WHILE;
+
+      IF NewMatchedToOld[i] = 0 THEN
+        LoadOnlyList[i] := TRUE;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  FOR a := 1 TO OldAvailCount DO
+    j := OldAvailIndex[a];
+    IF DFields_Old[j,3] <> '' THEN
+      UnloadOnlyList[j] := TRUE;
+    END_IF;
+  END_FOR;
+
+  (* STEP 3: DieUsed-based validation ONLY for load-only dies *)
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN
+      NewName := DFields[i,3];
+      NewLen := DFields[i,7];
+
+      foundLengthMatch := FALSE;
+      hasLengthValue := FALSE;
+      NewLenReal := 0.0;
+
+      IF NewLen <> '' THEN
+        NewLenReal := STRING_TO_REAL(NewLen);
+        hasLengthValue := TRUE;
+      END_IF;
+
+      IF hasLengthValue THEN
+        FOR j := 1 TO 20 DO
+          IF DDrawerName[j] = NewName THEN
+            FOR k := 1 TO 15 DO
+              IF (NOT DieUsed[j,k]) AND (ABS(DieLength[j, k] - NewLenReal) <= eps) THEN
+                foundLengthMatch := TRUE;
+                EXIT;
+              END_IF;
+            END_FOR;
+
+            IF foundLengthMatch THEN
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+
+      IF NOT foundLengthMatch THEN
+        ValidityFlag := FALSE;
+        PackageState := PPackageState.INVALID;
+        NextActionHint := PNextActionHint.INVALID_ABORT;
+        Error := TRUE;
+        ErrorText := CONCAT('INVALID: requested load die length NOT available in free ATC dies FOR die: ', NewName);
+
+        FOR i := 1 TO 15 DO
+          FOR j := 1 TO 12 DO
+            DFields[i,j] := '';
+          END_FOR;
+        END_FOR;
+
+        Busy := FALSE;
+        Done := TRUE;
+        RETURN;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  (* multiplicity check ONLY for load-only dies *)
+  uniqCount := 0;
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN
+      foundIndex := 0;
+      FOR a := 1 TO uniqCount DO
+        IF (uniqName[a] = DFields[i,3]) AND (uniqLen[a] = DFields[i,7]) THEN
+          foundIndex := a;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF foundIndex = 0 THEN
+        uniqCount := uniqCount + 1;
+        uniqName[uniqCount] := DFields[i,3];
+        uniqLen[uniqCount] := DFields[i,7];
+        uniqNeeded[uniqCount] := 1;
+      ELSE
+        uniqNeeded[foundIndex] := uniqNeeded[foundIndex] + 1;
+      END_IF;
+    END_IF;
+  END_FOR;
+
+  FOR a := 1 TO uniqCount DO
+    NewName := uniqName[a];
+    NewLen := uniqLen[a];
+
+    foundIndex := 0;
+    FOR e := 1 TO 20 DO
+      IF DDrawerName[e] = NewName THEN
+        foundIndex := e;
+        EXIT;
+      END_IF;
+    END_FOR;
+
+    IF foundIndex = 0 THEN
+      ValidityFlag := FALSE;
+      PackageState := PPackageState.INVALID;
+      NextActionHint := PNextActionHint.INVALID_ABORT;
+      Error := TRUE;
+      ErrorText := CONCAT('INVALID (load multiplicity): missing drawer for die ', NewName);
+
+      FOR i := 1 TO 15 DO
+        FOR j := 1 TO 12 DO
+          DFields[i,j] := '';
+        END_FOR;
+      END_FOR;
+
+      Busy := FALSE;
+      Done := TRUE;
+      RETURN;
+    END_IF;
+
+    availCount := 0;
+    IF (NewLen <> '') THEN
+      NewLenReal := STRING_TO_REAL(NewLen);
+
+      FOR e := 1 TO 20 DO
+        IF DDrawerName[e] = NewName THEN
+          FOR d := 1 TO 15 DO
+            IF (NOT DieUsed[e,d]) AND
+               (ABS(DieLength[e,d] - NewLenReal) <= eps) THEN
+              availCount := availCount + 1;
+            END_IF;
+          END_FOR;
+        END_IF;
+      END_FOR;
+    END_IF;
+
+    IF availCount < uniqNeeded[a] THEN
+      ValidityFlag := FALSE;
+      PackageState := PPackageState.INVALID;
+      NextActionHint := PNextActionHint.INVALID_ABORT;
+      Error := TRUE;
+      ErrorText := CONCAT('INVALID: insufficient FREE ATC slots for load die ', NewName);
+      ErrorText := CONCAT(ErrorText, CONCAT(' len=', NewLen));
+      ErrorText := CONCAT(ErrorText, CONCAT(' needed=', INT_TO_STRING(uniqNeeded[a])));
+      ErrorText := CONCAT(ErrorText, CONCAT(' available=', INT_TO_STRING(availCount)));
+
+      FOR i := 1 TO 15 DO
+        FOR j := 1 TO 12 DO
+          DFields[i,j] := '';
+        END_FOR;
+      END_FOR;
+
+      Busy := FALSE;
+      Done := TRUE;
+      RETURN;
+    END_IF;
+  END_FOR;
+
+  (* Compute summary counters *)
+  numSame := 0;
+  numDiff := 0;
+  FOR j := 1 TO 15 DO
+    IF KeepList[j] THEN
+      numSame := numSame + 1;
+    END_IF;
+    IF UnloadOnlyList[j] THEN
+      numDiff := numDiff + 1;
+    END_IF;
+  END_FOR;
+  FOR i := 1 TO 15 DO
+    IF LoadOnlyList[i] THEN
+      numDiff := numDiff + 1;
+    END_IF;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    OldName := DFields_Old[i,3];
+    NewName := DFields[i,3];
+    IF KeepList[i] THEN
+      PerIndexStatus[i] := PIndexStatus.SAME;
+    ELSIF (OldName = '') AND (NewName = '') THEN
+      PerIndexStatus[i] := PIndexStatus.SAME;
+    ELSE
+      PerIndexStatus[i] := PIndexStatus.DIFF;
+    END_IF;
+  END_FOR;
+
+  IF NOT ValidityFlag THEN
+    PackageState := PPackageState.INVALID;
+    NextActionHint := PNextActionHint.INVALID_ABORT;
+  ELSE
+    PackageState := PPackageState.PARTIAL_CHANGE;
+    NextActionHint := PNextActionHint.NO_ACTION;
+  END_IF;
+
+  ValidityFlag := NOT Error;
+
+  IF PackageState <> PPackageState.INVALID THEN
+    FOR i := 1 TO 15 DO
+      FOR j := 1 TO 12 DO
+        Retain_UnloadDieList[i,j] := '';
+        Retain_ATCUnloadDieList[i,j] := '';
+        Retain_LoadDieList[i,j] := '';
+        Retain_ATCLoadDieList[i,j] := '';
+        Retain_KeepDieList[i,j] := '';
+        Retain_KeepDieListNew[i,j] := '';
+      END_FOR;
+    END_FOR;
+
+    (* Pack UnloadDieList *)
+    UnloadTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF UnloadOnlyList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 20 DO
+          IF DDrawerName[k] = DFields_Old[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          UnloadTempCount := UnloadTempCount + 1;
+          UnloadTempOrigIndex[UnloadTempCount] := i;
+          UnloadTempDrawerIdx[UnloadTempCount] := foundIndex;
+          UnloadTempOrder[UnloadTempCount] := UnloadTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO UnloadTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO UnloadTempCount DO
+        IF UnloadTempDrawerIdx[b] < UnloadTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (UnloadTempDrawerIdx[b] = UnloadTempDrawerIdx[minIdx]) AND (UnloadTempOrder[b] < UnloadTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := UnloadTempOrigIndex[a];
+        UnloadTempOrigIndex[a] := UnloadTempOrigIndex[minIdx];
+        UnloadTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := UnloadTempDrawerIdx[a];
+        UnloadTempDrawerIdx[a] := UnloadTempDrawerIdx[minIdx];
+        UnloadTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := UnloadTempOrder[a];
+        UnloadTempOrder[a] := UnloadTempOrder[minIdx];
+        UnloadTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    UnloadCount := 0;
+    FOR a := 1 TO UnloadTempCount DO
+      UnloadCount := UnloadCount + 1;
+      i := UnloadTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_UnloadDieList[UnloadCount, j] := DFields_Old[i, j];
+      END_FOR;
+      Retain_UnloadDieList[UnloadCount, 12] := INT_TO_STRING(i);
+    END_FOR;
+
+    (* Pack LoadDieList *)
+    LoadTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF LoadOnlyList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 20 DO
+          IF DDrawerName[k] = DFields[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          LoadTempCount := LoadTempCount + 1;
+          LoadTempOrigIndex[LoadTempCount] := i;
+          LoadTempDrawerIdx[LoadTempCount] := foundIndex;
+          LoadTempOrder[LoadTempCount] := LoadTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO LoadTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO LoadTempCount DO
+        IF LoadTempDrawerIdx[b] < LoadTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (LoadTempDrawerIdx[b] = LoadTempDrawerIdx[minIdx]) AND (LoadTempOrder[b] < LoadTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := LoadTempOrigIndex[a];
+        LoadTempOrigIndex[a] := LoadTempOrigIndex[minIdx];
+        LoadTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := LoadTempDrawerIdx[a];
+        LoadTempDrawerIdx[a] := LoadTempDrawerIdx[minIdx];
+        LoadTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := LoadTempOrder[a];
+        LoadTempOrder[a] := LoadTempOrder[minIdx];
+        LoadTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    LoadCount := 0;
+    FOR a := 1 TO LoadTempCount DO
+      LoadCount := LoadCount + 1;
+      i := LoadTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_LoadDieList[LoadCount, j] := DFields[i, j];
+      END_FOR;
+      Retain_LoadDieList[LoadCount, 12] := INT_TO_STRING(i);
+    END_FOR;
+
+    (* ATC load mapping - DieUsed applies only here and in load-only validation above *)
+    FOR c := 1 TO 15 DO
+      FOR j := 1 TO 12 DO
+        Retain_ATCLoadDieList[c, j] := '';
+      END_FOR;
+    END_FOR;
+
+    FOR e := 1 TO 20 DO
+      FOR d := 1 TO 15 DO
+        usedSlot[e,d] := FALSE;
+      END_FOR;
+    END_FOR;
+
+    FOR i := 1 TO 15 DO
+      NewAssignedDrawer[i] := 0;
+      NewAssignedSlot[i] := 0;
+    END_FOR;
+
+    FOR c := 1 TO LoadCount DO
+      origNewIdx := LoadTempOrigIndex[c];
+      NewName := Retain_LoadDieList[c,3];
+      lenStr := Retain_LoadDieList[c,7];
+
+      foundIndex := 0;
+
+      IF (NewName <> '') AND (lenStr <> '') THEN
+        lenRealLocal := STRING_TO_REAL(lenStr);
+
+        FOR e := 1 TO 20 DO
+          IF DDrawerName[e] = NewName THEN
+            FOR d := 1 TO 15 DO
+              IF (NOT usedSlot[e,d]) AND (NOT DieUsed[e,d]) THEN
+                IF (ABS(DieLength[e,d] - lenRealLocal) <= eps) THEN
+                  usedSlot[e,d] := TRUE;
+                  foundIndex := e;
+
+                  Retain_ATCLoadDieList[c,1] := DDrawerName[e];
+                  Retain_ATCLoadDieList[c,2] := INT_TO_STRING(e);
+                  Retain_ATCLoadDieList[c,3] := INT_TO_STRING(d);
+                  Retain_ATCLoadDieList[c,4] := REAL_TO_STRING(DieLength[e,d]);
+                  Retain_ATCLoadDieList[c,5] := REAL_TO_STRING(DiePosition[e,d]);
+                  Retain_ATCLoadDieList[c,12] := INT_TO_STRING(origNewIdx);
+
+                  NewAssignedDrawer[origNewIdx] := e;
+                  NewAssignedSlot[origNewIdx] := d;
+                  EXIT;
+                END_IF;
+              END_IF;
+            END_FOR;
+
+            IF foundIndex <> 0 THEN
+              EXIT;
+            END_IF;
+          END_IF;
+        END_FOR;
+      END_IF;
+    END_FOR;
+
+    (* Pack KeepDieList old + corresponding new *)
+    KeepTempCount := 0;
+    FOR i := 1 TO 15 DO
+      IF KeepList[i] THEN
+        foundIndex := 0;
+        FOR k := 1 TO 20 DO
+          IF DDrawerName[k] = DFields_Old[i,3] THEN
+            foundIndex := k;
+            EXIT;
+          END_IF;
+        END_FOR;
+        IF foundIndex <> 0 THEN
+          KeepTempCount := KeepTempCount + 1;
+          KeepTempOrigIndex[KeepTempCount] := i;
+          KeepTempDrawerIdx[KeepTempCount] := foundIndex;
+          KeepTempOrder[KeepTempCount] := KeepTempCount;
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    FOR a := 1 TO KeepTempCount - 1 DO
+      minIdx := a;
+      FOR b := a + 1 TO KeepTempCount DO
+        IF KeepTempDrawerIdx[b] < KeepTempDrawerIdx[minIdx] THEN
+          minIdx := b;
+        ELSIF (KeepTempDrawerIdx[b] = KeepTempDrawerIdx[minIdx]) AND (KeepTempOrder[b] < KeepTempOrder[minIdx]) THEN
+          minIdx := b;
+        END_IF;
+      END_FOR;
+      IF minIdx <> a THEN
+        tmpInt := KeepTempOrigIndex[a];
+        KeepTempOrigIndex[a] := KeepTempOrigIndex[minIdx];
+        KeepTempOrigIndex[minIdx] := tmpInt;
+
+        tmpInt := KeepTempDrawerIdx[a];
+        KeepTempDrawerIdx[a] := KeepTempDrawerIdx[minIdx];
+        KeepTempDrawerIdx[minIdx] := tmpInt;
+
+        tmpInt := KeepTempOrder[a];
+        KeepTempOrder[a] := KeepTempOrder[minIdx];
+        KeepTempOrder[minIdx] := tmpInt;
+      END_IF;
+    END_FOR;
+
+    KeepCount := 0;
+    FOR a := 1 TO KeepTempCount DO
+      KeepCount := KeepCount + 1;
+      i := KeepTempOrigIndex[a];
+      FOR j := 1 TO 12 DO
+        Retain_KeepDieList[KeepCount, j] := DFields_Old[i, j];
+        Retain_KeepDieListNew[KeepCount, j] := '';
+      END_FOR;
+      Retain_KeepDieList[KeepCount, 12] := INT_TO_STRING(i);
+
+      tmpInt := 0;
+      FOR b := 1 TO 15 DO
+        IF NewMatchedToOld[b] = i THEN
+          tmpInt := b;
+          EXIT;
+        END_IF;
+      END_FOR;
+
+      IF tmpInt <> 0 THEN
+        FOR j := 1 TO 12 DO
+          Retain_KeepDieListNew[KeepCount, j] := DFields[tmpInt, j];
+        END_FOR;
+        Retain_KeepDieListNew[KeepCount, 12] := INT_TO_STRING(tmpInt);
+      END_IF;
+    END_FOR;
+
+    (* ATC unload mapping uses DFields_Old[,10]=drawer and [,11]=slot *)
+    FOR c := 1 TO 15 DO
+      FOR j := 1 TO 12 DO
+        Retain_ATCUnloadDieList[c, j] := '';
+      END_FOR;
+    END_FOR;
+
+    FOR c := 1 TO UnloadCount DO
+      tmpInt := UnloadTempOrigIndex[c];
+
+      IF (tmpInt >= 1) AND (tmpInt <= 15) AND (DFields_Old[tmpInt,10] <> '') AND (DFields_Old[tmpInt,11] <> '') THEN
+        e := STRING_TO_INT(DFields_Old[tmpInt,10]);
+        d := STRING_TO_INT(DFields_Old[tmpInt,11]);
+
+        IF (e >= 1) AND (e <= 20) AND (d >= 1) AND (d <= 15) THEN
+          Retain_ATCUnloadDieList[c,1] := DDrawerName[e];
+          Retain_ATCUnloadDieList[c,2] := DFields_Old[tmpInt,10];
+          Retain_ATCUnloadDieList[c,3] := DFields_Old[tmpInt,11];
+          Retain_ATCUnloadDieList[c,4] := REAL_TO_STRING(DieLength[e,d]);
+          Retain_ATCUnloadDieList[c,5] := REAL_TO_STRING(DiePosition[e,d]);
+          Retain_ATCUnloadDieList[c,12] := INT_TO_STRING(tmpInt);
+        END_IF;
+      END_IF;
+    END_FOR;
+
+    Busy := FALSE;
+    Done := TRUE;
+  ELSE
+    Busy := FALSE;
+    Done := TRUE;
+  END_IF;
+
+END_IF;
