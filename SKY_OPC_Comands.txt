@@ -12,7 +12,7 @@ VAR_INPUT
     Status_Machine_Clamped : BOOL;
     Status_Product_ProductName : STRING;
 	Status_Machine_MovementStates:DINT;
-	ATC_Cycle_Finish:BOOL; 
+	ATC_Cycle_Finish:BOOL;
 END_VAR
 
 VAR_OUTPUT
@@ -21,6 +21,10 @@ VAR_OUTPUT
     Command_Machine_KeyStop : DINT;                      //1=bırak, 2=bas
     Command_Machine_ExtraFunction : DINT;                //1=IndexPageOpen, 3=MenuPageOpened
     Press_Ready : BOOL;
+	Write_Product:BOOL;
+	Rotation_Arm_Error:BOOL;
+    Press_Prepare_Error : BOOL;
+    Press_Prepare_Error_Step : STRING(80);
 END_VAR
 
 VAR
@@ -28,25 +32,68 @@ VAR
     lastPreparePress : BOOL := FALSE;
     preparePressRising : BOOL := FALSE;
 	DownCommand_Delay           : TON;
+    Feedback_Delay              : TON;
+    Feedback_Waiting            : BOOL;
+    Feedback_Reset              : BOOL;
+    Feedback_PreviousState      : Press_Prepare := Press_Prepare.PP_IDLE;
+    Mode_Auto_Requested         : BOOL;
+	HM_Tolerance:REAL:=1;
 END_VAR
+
+
 preparePressRising := Prepare_Press AND NOT lastPreparePress;
 DownCommand_Delay(PT:=TO_TIME(2500));
+
+Feedback_Waiting := FALSE;
+CASE CurrentState OF
+    Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED,
+    Press_Prepare.PP_WAIT_PRODUCT_SELECTED,
+    Press_Prepare.PP_WAIT_MANUAL_MODE,
+    Press_Prepare.PP_WAIT_RUN_KEY_PRESS,
+    Press_Prepare.PP_WAIT_RUN_KEY_RELEASE,
+    Press_Prepare.PP_WAIT_PRESS_DOWN_COMPLETE,
+    Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION,
+    Press_Prepare.PP_WAIT_SELECTED_PRODUCT_COMAND,
+    Press_Prepare.PP_WAIT_AUTOMODE,
+    Press_Prepare.PP_WAIT_RUN_KEY_PRESS_AGAIN,
+    Press_Prepare.PP_WAIT_RUN_KEY_RELEASE_AGAIN:
+        Feedback_Waiting := TRUE;
+    Press_Prepare.PP_SET_PRESS_DOWN:
+        Feedback_Waiting := NOT (FMSC_PLC_IO.Press_Lower_Clamp_Ok AND
+                                 FMSC_PLC_IO.Press_Upper_Clamp_Ok AND
+                                 Machine_StatesModes = 4);
+END_CASE;
+
+Feedback_Delay(IN := Feedback_Waiting AND
+                     (CurrentState = Feedback_PreviousState) AND
+                     NOT Feedback_Reset AND NOT Abort_Cycle AND
+                     NOT Press_Prepare_Error,
+               PT := TO_TIME(1000));
+Feedback_PreviousState := CurrentState;
+Feedback_Reset := FALSE;
+
 IF Abort_Cycle THEN
 
     CurrentState := Press_Prepare.PP_IDLE;
     Press_Ready := FALSE;
+	Write_Product:=FALSE;
+    Rotation_Arm_Error := FALSE;
+    Press_Prepare_Error := FALSE;
+    Press_Prepare_Error_Step := '';
     DownCommand_Delay.IN:=FALSE;
+    Mode_Auto_Requested := FALSE;
     Command_Machine_StatesModes := 0;
     Command_Machine_KeyRun := 1;
     Command_Machine_KeyStop := 1;
     Command_Machine_ExtraFunction := 0;
+	Command_Product_ProductName:='';
 
-    FMSC_PLC_IO.Akas_Piston_Up_Valve := FALSE;
-    FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
+   // FMSC_PLC_IO.Akas_Piston_Up_Valve := FALSE;
+   //FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
     FMSC_PLC_IO.Press_Wait_LDP_Comand := FALSE;
     FMSC_PLC_IO.Press_Down_Comand := FALSE;
 
-ELSE
+ELSIF NOT Press_Prepare_Error THEN
 
     CASE CurrentState OF
 
@@ -64,47 +111,85 @@ ELSE
 
 
         Press_Prepare.PP_START_PREPARE:
-            FMSC_PLC_IO.Akas_Piston_Up_Valve := FALSE;
-            FMSC_PLC_IO.Akas_Piston_Down_Valve := TRUE;
-            CurrentState := Press_Prepare.PP_CLEAR_PRODUCT_COMMAND;
+			IF ABS(arAxes[EN_Axes.ATC_W].ActualPos - 135) <= HM_Tolerance THEN
+				FMSC_PLC_IO.Akas_Piston_Up_Valve := TRUE;
+				FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
+				FMSC_PLC_IO.Press_Lower_ClampOn:=TRUE;
+				FMSC_PLC_IO.Press_Upper_ClampOn:=TRUE;
+				CurrentState := Press_Prepare.PP_CLEAR_PRODUCT_COMMAND;
+			ELSE
+				Rotation_Arm_Error:=TRUE;
+                Press_Prepare_Error := TRUE;
+                Press_Prepare_Error_Step := 'PP_START_PREPARE';
+			END_IF
 
 
         Press_Prepare.PP_CLEAR_PRODUCT_COMMAND:
-            Command_Product_ProductName := '';
-            CurrentState := Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED;
+
+				Command_Product_ProductName := Status_Product_ProductName;
+				Write_Product:=TRUE;
+				CurrentState := Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED;
 
 
         Press_Prepare.PP_WAIT_PRODUCT_COMMAND_CLEARED:
-            IF Status_Product_ProductName = '' THEN
-                CurrentState := Press_Prepare.PP_SET_PRODUCT_COMMAND;
+
+            IF Feedback_Delay.Q THEN
+                IF Command_Product_ProductName = Status_Product_ProductName THEN
+                    CurrentState := Press_Prepare.PP_SET_PRODUCT_COMMAND;
+                    Write_Product := FALSE;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_PRODUCT_COMMAND_CLEARED';
+                END_IF;
             END_IF;
 
 
         Press_Prepare.PP_SET_PRODUCT_COMMAND:
             Command_Product_ProductName := 'ATC_Pre';
+			Write_Product:=TRUE;
             CurrentState := Press_Prepare.PP_WAIT_PRODUCT_SELECTED;
 
 
         Press_Prepare.PP_WAIT_PRODUCT_SELECTED:
-            IF Status_Product_ProductName = Command_Product_ProductName THEN
-                CurrentState := Press_Prepare.PP_SET_MANUAL_MODE;
-            END_IF;
 
+			IF Feedback_Delay.Q THEN
+				IF Status_Product_ProductName = Command_Product_ProductName THEN
+					Write_Product:=FALSE;
+					CurrentState := Press_Prepare.PP_SET_MANUAL_MODE;
+				ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_PRODUCT_SELECTED';
+				END_IF;
+            END_IF
 
         Press_Prepare.PP_SET_MANUAL_MODE:
-            Command_Machine_StatesModes := 4;
+
+            Command_Machine_StatesModes := 1;
+            Mode_Auto_Requested := FALSE;
             CurrentState := Press_Prepare.PP_WAIT_MANUAL_MODE;
 
 
         Press_Prepare.PP_WAIT_MANUAL_MODE:
-            IF Machine_StatesModes = 4 THEN
-                CurrentState := Press_Prepare.PP_SET_PRESS_WAIT_LDP;
+
+            IF Feedback_Delay.Q THEN
+                IF Machine_StatesModes = 4 THEN
+                    CurrentState := Press_Prepare.PP_SET_PRESS_WAIT_LDP;
+                ELSIF (Machine_StatesModes = 1) AND NOT Mode_Auto_Requested THEN
+                    Command_Machine_StatesModes := 4;
+                    Mode_Auto_Requested := TRUE;
+                    Feedback_Reset := TRUE;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_MANUAL_MODE';
+                END_IF;
             END_IF;
 
 
         Press_Prepare.PP_SET_PRESS_WAIT_LDP:
             FMSC_PLC_IO.Press_Wait_LDP_Comand := TRUE;
-            CurrentState := Press_Prepare.PP_RUN_KEY_PRESS;
+
+                CurrentState := Press_Prepare.PP_RUN_KEY_PRESS;
+
 
 
         Press_Prepare.PP_RUN_KEY_PRESS:
@@ -113,58 +198,161 @@ ELSE
 
 
         Press_Prepare.PP_WAIT_RUN_KEY_PRESS:
-            IF Status_Machine_KeyRun = 2 THEN
-                CurrentState := Press_Prepare.PP_RUN_KEY_RELEASE;
+            IF Feedback_Delay.Q THEN
+                IF Status_Machine_KeyRun = 2 THEN
+                    CurrentState := Press_Prepare.PP_RUN_KEY_RELEASE;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_RUN_KEY_PRESS';
+                END_IF;
             END_IF;
 
 
         Press_Prepare.PP_RUN_KEY_RELEASE:
-            Command_Machine_KeyRun := 2;
+            Command_Machine_KeyRun := 1;
             CurrentState := Press_Prepare.PP_WAIT_RUN_KEY_RELEASE;
 
 
         Press_Prepare.PP_WAIT_RUN_KEY_RELEASE:
-            IF Status_Machine_KeyRun = 2 THEN
-                CurrentState := Press_Prepare.PP_SET_PRESS_DOWN;
+            IF Feedback_Delay.Q THEN
+                // Existing = 2 check retained; review changing to 1 after timing tests.
+                IF Status_Machine_KeyRun = 2 THEN
+                    CurrentState := Press_Prepare.PP_SET_PRESS_DOWN;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_RUN_KEY_RELEASE';
+                END_IF;
             END_IF;
 
 
         Press_Prepare.PP_SET_PRESS_DOWN:
+
+		IF FMSC_PLC_IO.Press_Lower_Clamp_Ok AND FMSC_PLC_IO.Press_Upper_Clamp_Ok AND Machine_StatesModes = 4 THEN
 			DownCommand_Delay.IN:=TRUE;
-			IF DownCommand_Delay.Q THEN 
+			IF DownCommand_Delay.Q THEN
 				 FMSC_PLC_IO.Press_Down_Comand := TRUE;
 				 CurrentState := Press_Prepare.PP_WAIT_PRESS_DOWN_COMPLETE;
 			END_IF
+        ELSIF Feedback_Delay.Q THEN
+            Press_Prepare_Error := TRUE;
+            Press_Prepare_Error_Step := 'PP_SET_PRESS_DOWN';
+        END_IF
 
 
         Press_Prepare.PP_WAIT_PRESS_DOWN_COMPLETE:
 				DownCommand_Delay.IN:=FALSE;
-            IF Status_Machine_MovementStates = 4 THEN
-                CurrentState := Press_Prepare.PP_SET_AKAS_PISTON_UP;
+            IF Feedback_Delay.Q THEN
+                IF Status_Machine_MovementStates = 4 THEN
+                    CurrentState := Press_Prepare.PP_SET_AKAS_PISTON_UP;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_PRESS_DOWN_COMPLETE';
+                END_IF;
             END_IF;
 
 
-        Press_Prepare.PP_SET_AKAS_PISTON_UP:
-            FMSC_PLC_IO.Akas_Piston_Up_Valve := TRUE;
-            FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
-            CurrentState := Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION;
+		Press_Prepare.PP_SET_AKAS_PISTON_UP:
+			FMSC_PLC_IO.Akas_Piston_Up_Valve := TRUE;
+			FMSC_PLC_IO.Akas_Piston_Down_Valve := FALSE;
+			FMSC_PLC_IO.Press_Lower_ClampOn:=FALSE;
+			FMSC_PLC_IO.Press_Upper_ClampOn:=FALSE;
 
-        Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION:
-            IF FMSC_PLC_IO.Akas_Piston_Up_Position THEN
-                CurrentState := Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH;
-            END_IF;
+			CurrentState := Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION;
+
+		Press_Prepare.PP_WAIT_AKAS_PISTON_UP_POSITION:
+            IF Feedback_Delay.Q THEN
+                IF Fmsc_PLC_IO.Akas_Piston_Up_Position AND NOT FMSC_PLC_IO.Press_Lower_Clamp_Ok AND NOT FMSC_PLC_IO.Press_Upper_Clamp_Ok THEN
+                    CurrentState := Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_AKAS_PISTON_UP_POSITION';
+                END_IF;
+			END_IF;
 
 
         Press_Prepare.PP_WAIT_ATC_CYCLE_FINISH:
             Press_Ready := TRUE;
-
             IF ATC_Cycle_Finish THEN
-                CurrentState := Press_Prepare.PP_DONE;
+				 FMSC_PLC_IO.Press_Wait_LDP_Comand := FALSE;
+				 FMSC_PLC_IO.Press_Down_Comand := FALSE;
+				 IF FMSC_PLC_IO.Press_At_TDC THEN //TDC
+					 CurrentState := Press_Prepare.PP_SET_SELECTED_PRODUCT_COMAND;
+                END_IF
             END_IF;
 
 
+		Press_Prepare.PP_SET_SELECTED_PRODUCT_COMAND:
+            Command_Product_ProductName := Product_Name;
+			Write_Product:=TRUE;
+            CurrentState := Press_Prepare.PP_WAIT_SELECTED_PRODUCT_COMAND;
+
+        Press_Prepare.PP_WAIT_SELECTED_PRODUCT_COMAND:
+
+			IF Feedback_Delay.Q THEN
+				IF Status_Product_ProductName = Command_Product_ProductName THEN
+					Write_Product:=FALSE;
+					CurrentState := Press_Prepare.PP_SET_AUTOMODE;
+				ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_SELECTED_PRODUCT_COMAND';
+				END_IF;
+            END_IF
+
+        Press_Prepare.PP_SET_AUTOMODE:
+
+            Command_Machine_StatesModes := 1;
+            Mode_Auto_Requested := FALSE;
+            CurrentState := Press_Prepare.PP_WAIT_AUTOMODE;
+
+
+        Press_Prepare.PP_WAIT_AUTOMODE:
+
+            IF Feedback_Delay.Q THEN
+                IF Machine_StatesModes = 4 THEN
+                    CurrentState := Press_Prepare.PP_RUN_KEY_PRESS_AGAIN;
+                ELSIF (Machine_StatesModes = 1) AND NOT Mode_Auto_Requested THEN
+                    Command_Machine_StatesModes := 4;
+                    Mode_Auto_Requested := TRUE;
+                    Feedback_Reset := TRUE;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_AUTOMODE';
+                END_IF;
+            END_IF;
+
+        Press_Prepare.PP_RUN_KEY_PRESS_AGAIN:
+            Command_Machine_KeyRun := 2;
+            CurrentState := Press_Prepare.PP_WAIT_RUN_KEY_PRESS_AGAIN;
+
+
+        Press_Prepare.PP_WAIT_RUN_KEY_PRESS_AGAIN:
+            IF Feedback_Delay.Q THEN
+                IF Status_Machine_KeyRun = 2 THEN
+                    CurrentState := Press_Prepare.PP_RUN_KEY_RELEASE_AGAIN;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_RUN_KEY_PRESS_AGAIN';
+                END_IF;
+            END_IF;
+
+
+        Press_Prepare.PP_RUN_KEY_RELEASE_AGAIN:
+            Command_Machine_KeyRun := 1;
+            CurrentState := Press_Prepare.PP_WAIT_RUN_KEY_RELEASE_AGAIN;
+
+
+        Press_Prepare.PP_WAIT_RUN_KEY_RELEASE_AGAIN:
+            IF Feedback_Delay.Q THEN
+                IF Status_Machine_KeyRun = 1 THEN
+                    CurrentState := Press_Prepare.PP_DONE;
+                ELSE
+                    Press_Prepare_Error := TRUE;
+                    Press_Prepare_Error_Step := 'PP_WAIT_RUN_KEY_RELEASE_AGAIN';
+                END_IF;
+            END_IF;
+
         Press_Prepare.PP_DONE:
-            Press_Ready := TRUE;
+            Press_Ready := FALSE;
             IF NOT Prepare_Press THEN
                 CurrentState := Press_Prepare.PP_IDLE;
             END_IF;
