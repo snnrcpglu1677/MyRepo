@@ -1,5 +1,4 @@
 FUNCTION_BLOCK Punch_DraggLoad
-
 VAR_INPUT
   LoadStartCmd      : BOOL;   (* State_Machine'den gelen başlat komutu *)
   Reset             : BOOL;   (* SOFT reset: state/substate resetlemez, sadece requestleri keser *)
@@ -97,7 +96,6 @@ VAR
   ClampOn_Timer            : TON;
 END_VAR
 
-
 (* ------------------------------------------------------------ *)
 (* Combined enable: must be on Auto page AND General_Start TRUE *)
 (* ------------------------------------------------------------ *)
@@ -131,7 +129,7 @@ IF Abort_Cycle THEN
   Local_Shuttle_State := 0;
   Local_WareHouse_State := 0;
   Local_RotArm_State := 0;
-
+  arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=Retain_ZParameters[1];	
   PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_IDLE;
   PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_SH_IDLE;
   PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE;
@@ -175,6 +173,8 @@ IF Abort_Cycle THEN
   arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_DR].AxisAutoAccelerationRamp:=Retain_DRParameters[13];
+  arAxes[EN_Axes.ATC_DR].AxisAutoDecelerationRamp:=Retain_DRParameters[14];
 
   RETURN;
 END_IF
@@ -190,7 +190,7 @@ IF NOT AutoRunEnable AND NOT PLC_PRG.HMI.Drawer_Demand_Enable THEN
   arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
-
+  arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=Retain_ZParameters[1];	
   lastStartCmd := LoadStartCmd;
   RETURN;
 END_IF
@@ -206,6 +206,7 @@ IF Reset THEN
   arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
   arAxes[EN_Axes.ATC_W].AxisTravelRequestAbs := FALSE;
+  arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=Retain_ZParameters[1];	
 END_IF
 
 
@@ -435,10 +436,12 @@ IF LoadStartCmd THEN
           END_IF;
 
         PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_MOVE_OUTSIDE_CMD:
+		IF FMSC_PLC_IO.Akas_Piston_Up_Position THEN
           Fmsc_PLC_IO.Rotation_Arm_Move_Inside_Valve := FALSE;
           Fmsc_PLC_IO.Rotation_Arm_Move_Outside_Valve := TRUE;
           PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_OUTSIDE;
-
+        END_IF
+		
         PDraggLoad_RotArm_SubState.PDLD_ROT_L_INIT_WAIT_OUTSIDE:
           IF Fmsc_PLC_IO.Rotation_Arm_Outside THEN
             Fmsc_PLC_IO.Rotation_Arm_Move_Outside_Valve := FALSE;
@@ -1318,8 +1321,9 @@ IF LoadStartCmd THEN
             tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
 
             arAxes[EN_Axes.ATC_Z].TargetPos := TO_LREAL(Retain_ZParameters[11]);
-            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam3[tmpInt]);
-
+            arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam5[tmpInt]);
+			arAxes[EN_Axes.ATC_DR].AxisAutoAccelerationRamp:=Retain_DRParameters[17];
+			arAxes[EN_Axes.ATC_DR].AxisAutoDecelerationRamp:=Retain_DRParameters[18];
             arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
             arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
 
@@ -1628,10 +1632,9 @@ IF LoadStartCmd THEN
              (Retain_ATCDragLoadPunchList[Current_PunchIndex,2] <> '') THEN
 
             tmpInt := STRING_TO_INT(Retain_ATCDragLoadPunchList[Current_PunchIndex,2]);
-
+			arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=(Retain_ZParameters[1]*Retain_ZParameters[2])/100;	
             arAxes[EN_Axes.ATC_Z].TargetPos := STRING_TO_LREAL(Retain_DragLoadPunchList[Current_PunchIndex,6]) + REAL_TO_LREAL(Retain_ZParameters[19]);
             arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam6[tmpInt]);
-
             arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
             arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
 
@@ -1673,6 +1676,7 @@ IF LoadStartCmd THEN
           END_IF;
 
         PDraggLoad_SH_SubState.PDLD_L16_DONE:
+		  arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=Retain_ZParameters[1];	
           Local_Shuttle_State := Shuttle_States.DL_Punch_positioning_completed;
           PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_INIT;
 
@@ -1690,21 +1694,9 @@ IF LoadStartCmd THEN
           SH_DR_Done := FALSE;
           SH_DX_MoveRequested := FALSE;
           SH_DX_Done := FALSE;
-          PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD;
-
-        PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD:
-          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
-          ClampOn_Timer.IN := TRUE;
-          IF ClampOn_Timer.Q THEN
-            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK;
-          END_IF;
-
-        PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK:
-          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
-            ClampOn_Timer.IN := FALSE;
-            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PIN2_INSIDE_CMD;
-          END_IF;
-
+		  
+ 		    PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PIN2_INSIDE_CMD;
+			
         PDraggLoad_SH_SubState.PDLD_L17_PIN2_INSIDE_CMD:
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
@@ -1713,6 +1705,20 @@ IF LoadStartCmd THEN
         PDraggLoad_SH_SubState.PDLD_L17_WAIT_PIN2_INSIDE:
           IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
             Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD;
+          END_IF;
+			
+        PDraggLoad_SH_SubState.PDLD_L17_PRESS_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+		  Fmsc_PLC_IO.Press_Lower_ClampOn := TRUE;
+          ClampOn_Timer.IN := TRUE;
+          IF ClampOn_Timer.Q THEN
+            PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK;
+          END_IF;
+
+        PDraggLoad_SH_SubState.PDLD_L17_WAIT_CLAMP_OK:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND Fmsc_PLC_IO.Press_Lower_Clamp_Ok THEN
+            ClampOn_Timer.IN := FALSE;
             PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L17_PIN1_INSIDE_CMD;
           END_IF;
 
@@ -1749,11 +1755,14 @@ IF LoadStartCmd THEN
 
         PDraggLoad_SH_SubState.PDLD_L17_DONE:
           tmpInt2 := 0;
-          IF Retain_DragLoadPunchList[Current_PunchIndex,12] <> '' THEN
-            tmpInt2 := STRING_TO_INT(Retain_DragLoadPunchList[Current_PunchIndex,12]);
+          IF (Current_PunchIndex >= 1) AND (Current_PunchIndex <= 15) THEN
+            IF Retain_DragLoadPunchList[Current_PunchIndex,12] <> '' THEN
+              tmpInt2 := STRING_TO_INT(Retain_DragLoadPunchList[Current_PunchIndex,12]);
+            END_IF;
           END_IF;
 
-          IF (tmpInt2 >= 1) AND (tmpInt2 <= 15) THEN
+          IF (Current_PunchIndex >= 1) AND (Current_PunchIndex <= 15) AND
+             (tmpInt2 >= 1) AND (tmpInt2 <= 15) THEN
             FOR l := 1 TO 12 DO
               PFields_Old[tmpInt2, l] := Retain_DragLoadPunchList[Current_PunchIndex, l];
             END_FOR;
@@ -1769,7 +1778,11 @@ IF LoadStartCmd THEN
             ELSE
               PFields_Old[tmpInt2,11] := '';
             END_IF;
-          END_IF;
+
+          FOR l := 1 TO 12 DO
+            Retain_DragLoadPunchList[Current_PunchIndex, l] := '';
+            Retain_ATCDragLoadPunchList[Current_PunchIndex, l] := '';
+          END_FOR;
 
           Current_PunchIndex := Current_PunchIndex + 1;
           Current_Punch_Count := Current_Punch_Count + 1;
@@ -1790,6 +1803,7 @@ IF LoadStartCmd THEN
             PDraggLoad_WH_SubStates := PDraggLoad_WH_SubState.PDLD_IDLE;
             PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_SH_IDLE;
             PDraggLoad_RotArm_SubStates := PDraggLoad_RotArm_SubState.PDLD_ROT_IDLE;
+			arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity:=Retain_ZParameters[1];	
 
           ELSE
             Current_PunchLoaded := TRUE;
@@ -1818,7 +1832,8 @@ IF LoadStartCmd THEN
             SH_DR_Done := FALSE;
             SH_Z_MoveRequested := FALSE;
             SH_Z_Done := FALSE;
-
+			arAxes[EN_Axes.ATC_DR].AxisAutoAccelerationRamp:=Retain_DRParameters[13];
+			arAxes[EN_Axes.ATC_DR].AxisAutoDecelerationRamp:=Retain_DRParameters[14];
             RotRequired := FALSE;
             RotArm_RotationDone := FALSE;
             RotArm_PunchReleased := FALSE;
@@ -1828,6 +1843,9 @@ IF LoadStartCmd THEN
 
             Local_Shuttle_State := Shuttle_States.DL_Shuttle_starts_PPick_up;
             PDraggLoad_SH_SubStates := PDraggLoad_SH_SubState.PDLD_L10_INIT;
+          END_IF;
+          ELSE
+            LoadError := TRUE;
           END_IF;
 
       ELSE
