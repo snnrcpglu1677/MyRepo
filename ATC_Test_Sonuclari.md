@@ -28,5 +28,6 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Punch boşaltma:** Son punch unload edildikten sonra
   `PUNL_U26_Z_DR_DX_TO_PUNCH_PICKPOS_REQ` adımında `tmpInt = 0` iken
   `pDrawerParam6[tmpInt]` erişiminde exception bildirildi.
-- **Die boşaltma ve son fiziksel durum:** Bildirilmedi.
+- **Exception sonrası fiziksel durum:** Kullanıcı punch'ın warehouse'taki
+  slotunda, die'ın ise abkantta takılı olduğunu doğruladı.
 - **Sonuç:** Tamamlanmadı; punch unload sonrası exception araştırılıyor.
