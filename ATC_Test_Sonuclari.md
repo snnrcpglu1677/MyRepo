@@ -40,19 +40,23 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 ## T03 — Aynı programın tekrar yüklenmesi (keep)
 
 - **Tarih:** 2026-11-25
+- **Abkant programı:** Kullanıcı `ATC-TEST1` ile test edildiğini bildirdi
+  (Test 1 için program adı `ATC_TEST1` olarak bildirilmişti).
 - **Program A:** BIU-031 punch, boy 255, horn 0; OZU-362 die, boy 255.
 - **İlk aşama:** Kullanıcı Program A'nın yüklendiğini bildirdi.
 - **İkinci aşama:** Kullanıcı güncel changer'larla aynı programı tekrar load
   talep ettiğinde `NO_ACTION` tespit edildiğini ve aşamanın başarılı olduğunu
   bildirdi.
-- **Boşaltma / son fiziksel durum:** Henüz bildirilmedi.
+- **Son fiziksel durum:** Kullanıcı 255 boy BIU-031 punch'ın abkantta takılı
+  olduğunu doğruladı. Die'ın son fiziksel durumu henüz bildirilmedi.
 
 ## T04 — Aynı punch'ın pozisyonunu değiştirme (planlandı)
 
 - **Tarih:** 2026-11-25
 - **Abkant programı:** `ATC-TEST4`.
-- **Başlangıç:** Kullanıcı abkantta `ATC_TEST2` programının yüklü olduğunu
-  bildirdi. Test 3 planındaki Program A ile bu bilgi arasındaki ilişki henüz
-  netleştirilmedi.
-- **Plan:** `ATC_TEST2` programındaki punch'ın yalnızca pozisyonu
-  değiştirilecek. Program hazırlanacak; test sonucu henüz bildirilmedi.
+- **Başlangıç:** Kullanıcı önce `ATC_TEST2` yüklü olduğunu bildirdi, ardından
+  bunun yanlış olduğunu ve Test 3'ün `ATC-TEST1` ile yapıldığını düzeltti.
+  BIU-031 boy 255 punch abkantta; die durumu henüz bildirilmedi.
+- **Plan:** İlk bildirime göre `ATC_TEST2` punch'ının yalnızca pozisyonu
+  değiştirilecekti. Başlangıç durumu düzeltildiğinden programın hangi takımı
+  içereceği henüz netleştirilmedi; test sonucu bildirilmedi.
