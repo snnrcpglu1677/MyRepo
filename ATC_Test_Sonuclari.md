@@ -30,4 +30,7 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   `pDrawerParam6[tmpInt]` erişiminde exception bildirildi.
 - **Exception sonrası fiziksel durum:** Kullanıcı punch'ın warehouse'taki
   slotunda, die'ın ise abkantta takılı olduğunu doğruladı.
-- **Sonuç:** Tamamlanmadı; punch unload sonrası exception araştırılıyor.
+- **Düzeltme sonrası tekrar test (2026-11-25):** Kullanıcı Test 2'nin load ve
+  unload olarak başarıyla tamamlandığını bildirdi. Kullanılan düzeltilmiş
+  Punch_Unloading henüz depoya alınmadı; ara değerler bildirilmedi.
+- **Sonuç:** Başarılı (exception düzeltmesi sonrası).
