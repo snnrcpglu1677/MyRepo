@@ -34,3 +34,10 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   unload olarak başarıyla tamamlandığını bildirdi. Kullanılan düzeltilmiş
   Punch_Unloading henüz depoya alınmadı; ara değerler bildirilmedi.
 - **Sonuç:** Başarılı (exception düzeltmesi sonrası).
+
+## T03 — Aynı programın tekrar yüklenmesi (keep)
+
+- **Tarih:** 2026-11-25
+- **Program A:** BIU-031 punch, boy 255, horn 0; OZU-362 die, boy 255.
+- **İlk aşama:** Kullanıcı Program A'nın yüklendiğini bildirdi.
+- **Sonraki aşama:** Aynı programın tekrar yüklenmesi henüz test edilmedi.
