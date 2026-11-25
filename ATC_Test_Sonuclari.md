@@ -40,4 +40,7 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Tarih:** 2026-11-25
 - **Program A:** BIU-031 punch, boy 255, horn 0; OZU-362 die, boy 255.
 - **İlk aşama:** Kullanıcı Program A'nın yüklendiğini bildirdi.
-- **Sonraki aşama:** Aynı programın tekrar yüklenmesi henüz test edilmedi.
+- **İkinci aşama:** Kullanıcı güncel changer'larla aynı programı tekrar load
+  talep ettiğinde `NO_ACTION` tespit edildiğini ve aşamanın başarılı olduğunu
+  bildirdi.
+- **Boşaltma / son fiziksel durum:** Henüz bildirilmedi.
