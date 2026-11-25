@@ -16,9 +16,9 @@ VAR_OUTPUT RETAIN
   numDiff  : INT;
   newCount : INT;
   oldCount : INT;
-  
+
   ErrorText : STRING(200);
-  Error : BOOL; 
+  Error : BOOL;
   Busy  : BOOL;
   Done  : BOOL;
 END_VAR
@@ -29,12 +29,12 @@ VAR RETAIN
   k : INT;
   assigned:BOOL;
   foundIndex : INT;
-  
+
   usedSlot :ARRAY [1..16, 1..15] OF BOOL;
   usedSlotOld :ARRAY [1..16, 1..15] OF BOOL;   (* unload: ATC slot cozumleme icin *)
   OldAssignedDrawer:ARRAY[1..15] OF INT;
   OldAssignedSlot:ARRAY[1..15] OF INT;
-  
+
   NewAssignedDrawer:ARRAY[1..15] OF INT;
   NewAssignedSlot   : ARRAY[1..15] OF INT;
   origNewIdx:INT;
@@ -132,6 +132,15 @@ VAR
 	tmpPos : LREAL;
 	hasRelocateOverlap : BOOL;
 	drawerTmp : INT;
+	indicatorColumn : INT;
+	indicatorPos : INT;
+	indicatorValue : INT;
+	indicatorLimit : INT;
+	indicatorDigit : STRING(1);
+	indicatorValid : BOOL;
+	noActionMatchedOld : ARRAY[1..15] OF BOOL;
+	noActionAllMatched : BOOL;
+	noActionFound : BOOL;
 END_VAR
 
 (* ============================================================ *)
@@ -429,7 +438,11 @@ IF Unload THEN
   END_FOR;
 
   PackageState := PPackageState.PARTIAL_CHANGE;
-  NextActionHint := PNextActionHint.NO_ACTION;
+  IF oldCount = 0 THEN
+    NextActionHint := PNextActionHint.NO_ACTION;
+  ELSE
+    NextActionHint := PNextActionHint.ACTION_REQUIRED;
+  END_IF;
   ValidityFlag := TRUE;
 
   Busy := FALSE;
@@ -437,6 +450,11 @@ IF Unload THEN
 
 
 ELSIF Trigger THEN
+  FOR i := 1 TO 20 DO
+    SPunchDrawerNo[i] := 0;
+    SPunchIndex[i] := 0;
+  END_FOR;
+
   Busy := TRUE;
   Done := FALSE;
   Error := FALSE;
@@ -784,12 +802,46 @@ ELSIF Trigger THEN
     END_IF;
   END_FOR;
 
+  (* Compare tool and position pairs independently of keep pairing. *)
+  noActionAllMatched := (newCount = oldCount);
+  FOR j := 1 TO 15 DO
+    noActionMatchedOld[j] := FALSE;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    IF PFields[i,3] <> '' THEN
+      noActionFound := FALSE;
+      IF (PFields[i,6] <> '') AND (PFields[i,7] <> '') AND
+         (PFields[i,8] <> '') AND (PFields[i,9] <> '') THEN
+        FOR j := 1 TO 15 DO
+          IF (NOT noActionMatchedOld[j]) AND
+             (PFields[i,3] = PFields_Old[j,3]) AND
+             (PFields[i,6] = PFields_Old[j,6]) AND
+             (PFields[i,7] = PFields_Old[j,7]) AND
+             (PFields[i,8] = PFields_Old[j,8]) AND
+             (PFields[i,9] = PFields_Old[j,9]) THEN
+            noActionMatchedOld[j] := TRUE;
+            noActionFound := TRUE;
+            EXIT;
+          END_IF;
+        END_FOR;
+      END_IF;
+      IF NOT noActionFound THEN
+        noActionAllMatched := FALSE;
+      END_IF;
+    END_IF;
+  END_FOR;
+
   IF NOT ValidityFlag THEN
     PackageState := PPackageState.INVALID;
     NextActionHint := PNextActionHint.INVALID_ABORT;
   ELSE
     PackageState := PPackageState.PARTIAL_CHANGE;
-    NextActionHint := PNextActionHint.NO_ACTION;
+    IF noActionAllMatched THEN
+      NextActionHint := PNextActionHint.NO_ACTION;
+    ELSE
+      NextActionHint := PNextActionHint.ACTION_REQUIRED;
+    END_IF;
   END_IF;
 
   ValidityFlag := NOT Error;
@@ -1091,6 +1143,9 @@ ELSIF Trigger THEN
                 NewAssignedDrawer[origNewIdx] := e;
                 NewAssignedSlot[origNewIdx] := d;
 
+                SPunchDrawerNo[origNewIdx] := e;
+                SPunchIndex[origNewIdx] := d;
+
                 Retain_LoadPunchList[c,10] := INT_TO_STRING(e);
                 Retain_LoadPunchList[c,11] := INT_TO_STRING(d);
 
@@ -1193,6 +1248,39 @@ ELSIF Trigger THEN
         END_FOR;
 
         Retain_KeepPunchListNew[KeepCount,12] := INT_TO_STRING(tmpInt);
+
+        (* Keep addresses come from the matched physical punch's old record. *)
+        FOR indicatorColumn := 10 TO 11 DO
+          indicatorValue := 0;
+          indicatorValid := LEN(PFields_Old[i,indicatorColumn]) > 0;
+          IF indicatorColumn = 10 THEN
+            indicatorLimit := 16;
+          ELSE
+            indicatorLimit := 15;
+          END_IF;
+
+          FOR indicatorPos := 1 TO LEN(PFields_Old[i,indicatorColumn]) DO
+            indicatorDigit := MID(PFields_Old[i,indicatorColumn], 1, indicatorPos);
+            IF (indicatorDigit < '0') OR (indicatorDigit > '9') THEN
+              indicatorValid := FALSE;
+              EXIT;
+            END_IF;
+
+            indicatorValue := indicatorValue * 10 + STRING_TO_INT(indicatorDigit);
+            IF indicatorValue > indicatorLimit THEN
+              indicatorValid := FALSE;
+              EXIT;
+            END_IF;
+          END_FOR;
+
+          IF indicatorValid AND (indicatorValue > 0) THEN
+            IF indicatorColumn = 10 THEN
+              SPunchDrawerNo[tmpInt] := indicatorValue;
+            ELSE
+              SPunchIndex[tmpInt] := indicatorValue;
+            END_IF;
+          END_IF;
+        END_FOR;
       END_IF;
     END_FOR;
 
@@ -1326,3 +1414,5 @@ ELSIF Trigger THEN
   END_IF;
 
 END_IF;
+
+(* PunchChanger.V9 *)

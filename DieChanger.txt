@@ -104,7 +104,17 @@ END_VAR
 VAR
 	eTmp : INT;
 	dTmp : INT;
+	indicatorColumn : INT;
+	indicatorPos : INT;
+	indicatorValue : INT;
+	indicatorLimit : INT;
+	indicatorDigit : STRING(1);
+	indicatorValid : BOOL;
+	noActionMatchedOld : ARRAY[1..15] OF BOOL;
+	noActionAllMatched : BOOL;
+	noActionFound : BOOL;
 END_VAR
+
 (* Abort clears generated lists and transient state, but preserves DFields and
    DFields_Old as the requested and physical die records. *)
 IF Abbort THEN
@@ -324,13 +334,22 @@ IF Unload THEN
   END_FOR;
 
   PackageState := PPackageState.PARTIAL_CHANGE;
-  NextActionHint := PNextActionHint.NO_ACTION;
+  IF oldCount = 0 THEN
+    NextActionHint := PNextActionHint.NO_ACTION;
+  ELSE
+    NextActionHint := PNextActionHint.ACTION_REQUIRED;
+  END_IF;
   ValidityFlag := TRUE;
 
   Busy := FALSE;
   Done := TRUE;
 
 ELSIF Trigger THEN
+  FOR i := 1 TO 20 DO
+    DPunchDrawerNo[i] := 0;
+    DPunchIndex[i] := 0;
+  END_FOR;
+
   (* initialize *)
   Busy := TRUE;
   Done := FALSE;
@@ -689,12 +708,43 @@ ELSIF Trigger THEN
     END_IF;
   END_FOR;
 
+  (* Compare tool and position pairs independently of keep pairing. *)
+  noActionAllMatched := (newCount = oldCount);
+  FOR j := 1 TO 15 DO
+    noActionMatchedOld[j] := FALSE;
+  END_FOR;
+
+  FOR i := 1 TO 15 DO
+    IF DFields[i,3] <> '' THEN
+      noActionFound := FALSE;
+      IF (DFields[i,6] <> '') AND (DFields[i,7] <> '') THEN
+        FOR j := 1 TO 15 DO
+          IF (NOT noActionMatchedOld[j]) AND
+             (DFields[i,3] = DFields_Old[j,3]) AND
+             (DFields[i,6] = DFields_Old[j,6]) AND
+             (DFields[i,7] = DFields_Old[j,7]) THEN
+            noActionMatchedOld[j] := TRUE;
+            noActionFound := TRUE;
+            EXIT;
+          END_IF;
+        END_FOR;
+      END_IF;
+      IF NOT noActionFound THEN
+        noActionAllMatched := FALSE;
+      END_IF;
+    END_IF;
+  END_FOR;
+
   IF NOT ValidityFlag THEN
     PackageState := PPackageState.INVALID;
     NextActionHint := PNextActionHint.INVALID_ABORT;
   ELSE
     PackageState := PPackageState.PARTIAL_CHANGE;
-    NextActionHint := PNextActionHint.NO_ACTION;
+    IF noActionAllMatched THEN
+      NextActionHint := PNextActionHint.NO_ACTION;
+    ELSE
+      NextActionHint := PNextActionHint.ACTION_REQUIRED;
+    END_IF;
   END_IF;
 
   ValidityFlag := NOT Error;
@@ -864,6 +914,8 @@ ELSIF Trigger THEN
 
                   NewAssignedDrawer[origNewIdx] := e;
                   NewAssignedSlot[origNewIdx] := d;
+                  DPunchDrawerNo[origNewIdx] := e;
+                  DPunchIndex[origNewIdx] := d;
                   EXIT;
                 END_IF;
               END_IF;
@@ -944,6 +996,39 @@ ELSIF Trigger THEN
           Retain_KeepDieListNew[KeepCount, j] := DFields[tmpInt, j];
         END_FOR;
         Retain_KeepDieListNew[KeepCount, 12] := INT_TO_STRING(tmpInt);
+
+        (* Keep addresses come from the matched physical die's old record. *)
+        FOR indicatorColumn := 10 TO 11 DO
+          indicatorValue := 0;
+          indicatorValid := LEN(DFields_Old[i,indicatorColumn]) > 0;
+          IF indicatorColumn = 10 THEN
+            indicatorLimit := 20;
+          ELSE
+            indicatorLimit := 15;
+          END_IF;
+
+          FOR indicatorPos := 1 TO LEN(DFields_Old[i,indicatorColumn]) DO
+            indicatorDigit := MID(DFields_Old[i,indicatorColumn], 1, indicatorPos);
+            IF (indicatorDigit < '0') OR (indicatorDigit > '9') THEN
+              indicatorValid := FALSE;
+              EXIT;
+            END_IF;
+
+            indicatorValue := indicatorValue * 10 + STRING_TO_INT(indicatorDigit);
+            IF indicatorValue > indicatorLimit THEN
+              indicatorValid := FALSE;
+              EXIT;
+            END_IF;
+          END_FOR;
+
+          IF indicatorValid AND (indicatorValue > 0) THEN
+            IF indicatorColumn = 10 THEN
+              DPunchDrawerNo[tmpInt] := indicatorValue;
+            ELSE
+              DPunchIndex[tmpInt] := indicatorValue;
+            END_IF;
+          END_IF;
+        END_FOR;
       END_IF;
     END_FOR;
 
@@ -980,3 +1065,5 @@ ELSIF Trigger THEN
   END_IF;
 
 END_IF;
+
+(* DieChanger.V1 *)
