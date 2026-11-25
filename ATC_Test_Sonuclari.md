@@ -53,10 +53,10 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 ## T04 — Aynı punch'ın pozisyonunu değiştirme (planlandı)
 
 - **Tarih:** 2026-11-25
-- **Abkant programı:** `ATC-TEST4`.
+- **Abkant programı:** `ATC_TEST4`.
 - **Başlangıç:** Kullanıcı önce `ATC_TEST2` yüklü olduğunu bildirdi, ardından
   bunun yanlış olduğunu ve Test 3'ün `ATC-TEST1` ile yapıldığını düzeltti.
   BIU-031 boy 255 punch abkantta; die durumu henüz bildirilmedi.
-- **Plan:** İlk bildirime göre `ATC_TEST2` punch'ının yalnızca pozisyonu
-  değiştirilecekti. Başlangıç durumu düzeltildiğinden programın hangi takımı
-  içereceği henüz netleştirilmedi; test sonucu bildirilmedi.
+- **Plan:** `ATC_TEST1` temel alınarak ayrı bir `ATC_TEST4` programı
+  oluşturulacak; yalnızca 255 boy punch'ın pozisyonu değiştirilecek.
+  Test sonucu henüz bildirilmedi.
