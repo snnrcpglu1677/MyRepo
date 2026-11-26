@@ -823,9 +823,19 @@ IF initiated THEN
         DKeep_SH_SubState.DKSH_PICK_WAIT_PIN1_OUT:
           IF Fmsc_PLC_IO.Shuttle_Pin1_Outside THEN
             Fmsc_PLC_IO.Shuttle_Pin1_Move_Outside_Valve := FALSE;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_CLAMP_OFF_CMD;
+          END_IF;
+		  
+        DKeep_SH_SubState.DKSH_PICK_CLAMP_OFF_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
+		  Fmsc_PLC_IO.Press_Lower_ClampOn := FALSE;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_WAIT_CLAMP_OFF;
+
+        DKeep_SH_SubState.DKSH_PICK_WAIT_CLAMP_OFF:
+          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND NOT Fmsc_PLC_IO.Press_Lower_ClampOn THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_PIN2_OUT_CMD;
           END_IF;
-
+		  
         DKeep_SH_SubState.DKSH_PICK_PIN2_OUT_CMD:
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
@@ -834,18 +844,9 @@ IF initiated THEN
         DKeep_SH_SubState.DKSH_PICK_WAIT_PIN2_OUT:
           IF Fmsc_PLC_IO.Shuttle_Pin2_Outside THEN
             Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_CLAMP_OFF_CMD;
-          END_IF;
-
-        DKeep_SH_SubState.DKSH_PICK_CLAMP_OFF_CMD:
-          Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_WAIT_CLAMP_OFF;
-
-        DKeep_SH_SubState.DKSH_PICK_WAIT_CLAMP_OFF:
-          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PICK_DONE;
           END_IF;
-
+		  
         DKeep_SH_SubState.DKSH_PICK_DONE:
           IF SelectedWasDirectSlide THEN
             Local_Shuttle_State := Shuttle_States.S_KEEP_EXECUTE_DIRECT_SLIDE;
@@ -896,17 +897,8 @@ IF initiated THEN
 
         DKeep_SH_SubState.DKSH_DSLIDE_SET_Z_NORMAL:
           arAxes[EN_Axes.ATC_Z].AxisAutoSetVelocity := Retain_ZParameters[1];
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_CLAMP_ON_CMD;
-
-        DKeep_SH_SubState.DKSH_DSLIDE_CLAMP_ON_CMD:
-          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_WAIT_CLAMP_ON;
-
-        DKeep_SH_SubState.DKSH_DSLIDE_WAIT_CLAMP_ON:
-          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_PIN2_IN_CMD;
-          END_IF;
-
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_PIN2_IN_CMD;
+		  
         DKeep_SH_SubState.DKSH_DSLIDE_PIN2_IN_CMD:
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
@@ -915,6 +907,16 @@ IF initiated THEN
         DKeep_SH_SubState.DKSH_DSLIDE_WAIT_PIN2_IN:
           IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
             Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_CLAMP_ON_CMD;
+          END_IF;
+		  
+        DKeep_SH_SubState.DKSH_DSLIDE_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+		  Fmsc_PLC_IO.Press_Lower_ClampOn := TRUE;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_WAIT_CLAMP_ON;
+
+        DKeep_SH_SubState.DKSH_DSLIDE_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND Fmsc_PLC_IO.Press_Lower_Clamp_Ok THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_DSLIDE_PIN1_IN_CMD;
           END_IF;
 
@@ -977,29 +979,40 @@ IF initiated THEN
             arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
             SH_DR_MoveRequested := FALSE;
             SH_DR_Done := TRUE;
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_DX_SAFE_Z_TARGET_REQ;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_DX_SAFE_TARGET_REQ;
           END_IF;
 
-        DKeep_SH_SubState.DKSH_PNP_DX_SAFE_Z_TARGET_REQ:
+        DKeep_SH_SubState.DKSH_PNP_DX_SAFE_TARGET_REQ:
           arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
-          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_DieIndex];
-
           arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
-          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
 
           SH_DX_MoveRequested := TRUE;
           SH_DX_Done := FALSE;
-          SH_Z_MoveRequested := TRUE;
-          SH_Z_Done := FALSE;
 
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_DX_SAFE_Z_TARGET_WAIT;
 
-        DKeep_SH_SubState.DKSH_PNP_DX_SAFE_Z_TARGET_WAIT:
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_DX_SAFE_TARGET_WAIT;
+
+        DKeep_SH_SubState.DKSH_PNP_DX_SAFE_TARGET_WAIT:
           IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
             arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
             SH_DX_MoveRequested := FALSE;
             SH_DX_Done := TRUE;
           END_IF;
+
+          IF SH_DX_Done THEN
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_Z_TARGET_REQ;
+          END_IF;
+
+        DKeep_SH_SubState.DKSH_PNP_Z_TARGET_REQ:
+          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_DieIndex];
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_Z_TARGET_WAIT;
+
+        DKeep_SH_SubState.DKSH_PNP_Z_TARGET_WAIT:
 
           IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
             arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
@@ -1007,9 +1020,11 @@ IF initiated THEN
             SH_Z_Done := TRUE;
           END_IF;
 
-          IF SH_DX_Done AND SH_Z_Done THEN
+          IF  SH_Z_Done THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_DX_ALIGN_REQ;
           END_IF;
+///////////////////////////////////
+
 
         DKeep_SH_SubState.DKSH_PNP_DX_ALIGN_REQ:
           DrawerIdx := 0;
@@ -1058,16 +1073,7 @@ IF initiated THEN
 
         DKeep_SH_SubState.DKSH_PNP_SET_DR_NORMAL:
           arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_CLAMP_ON_CMD;
-
-        DKeep_SH_SubState.DKSH_PNP_CLAMP_ON_CMD:
-          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_WAIT_CLAMP_ON;
-
-        DKeep_SH_SubState.DKSH_PNP_WAIT_CLAMP_ON:
-          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_PIN2_IN_CMD;
-          END_IF;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_PIN2_IN_CMD;
 
         DKeep_SH_SubState.DKSH_PNP_PIN2_IN_CMD:
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
@@ -1077,6 +1083,16 @@ IF initiated THEN
         DKeep_SH_SubState.DKSH_PNP_WAIT_PIN2_IN:
           IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
             Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_CLAMP_ON_CMD;
+          END_IF;
+		  
+        DKeep_SH_SubState.DKSH_PNP_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+		  Fmsc_PLC_IO.Press_Lower_ClampOn := TRUE;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_WAIT_CLAMP_ON;
+
+        DKeep_SH_SubState.DKSH_PNP_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND Fmsc_PLC_IO.Press_Lower_ClampOn THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_PNP_PIN1_IN_CMD;
           END_IF;
 
@@ -1139,29 +1155,40 @@ IF initiated THEN
             arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := FALSE;
             SH_DR_MoveRequested := FALSE;
             SH_DR_Done := TRUE;
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_DX_SAFE_Z_BUFFER_REQ;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_DX_SAFE_BUFFER_REQ;
           END_IF;
 
-        DKeep_SH_SubState.DKSH_BUF_DX_SAFE_Z_BUFFER_REQ:
+        DKeep_SH_SubState.DKSH_BUF_DX_SAFE_BUFFER_REQ:
           arAxes[EN_Axes.ATC_DX].TargetPos := TO_LREAL(Retain_DXParameters[4]);
-          arAxes[EN_Axes.ATC_Z].TargetPos := BufferTargetZ;
-
           arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := TRUE;
-          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
-
+		  
           SH_DX_MoveRequested := TRUE;
           SH_DX_Done := FALSE;
-          SH_Z_MoveRequested := TRUE;
-          SH_Z_Done := FALSE;
 
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_DX_SAFE_Z_BUFFER_WAIT;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_DX_SAFE_BUFFER_WAIT;
 
-        DKeep_SH_SubState.DKSH_BUF_DX_SAFE_Z_BUFFER_WAIT:
+        DKeep_SH_SubState.DKSH_BUF_DX_SAFE_BUFFER_WAIT:
           IF ABS(arAxes[EN_Axes.ATC_DX].ActualPos - arAxes[EN_Axes.ATC_DX].TargetPos) <= KeepPosEps THEN
             arAxes[EN_Axes.ATC_DX].AxisTravelRequestAbs := FALSE;
             SH_DX_MoveRequested := FALSE;
             SH_DX_Done := TRUE;
           END_IF;
+
+          IF SH_DX_Done THEN
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_Z_BUFFER_REQ;
+          END_IF;
+		  
+
+        DKeep_SH_SubState.DKSH_BUF_Z_BUFFER_REQ:
+          arAxes[EN_Axes.ATC_Z].TargetPos := BufferTargetZ;
+          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+
+          SH_Z_MoveRequested := TRUE;
+          SH_Z_Done := FALSE;
+
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_Z_BUFFER_WAIT;
+
+        DKeep_SH_SubState.DKSH_BUF_Z_BUFFER_WAIT:
 
           IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
             arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := FALSE;
@@ -1169,7 +1196,7 @@ IF initiated THEN
             SH_Z_Done := TRUE;
           END_IF;
 
-          IF SH_DX_Done AND SH_Z_Done THEN
+          IF SH_Z_Done THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_DX_ALIGN_REQ;
           END_IF;
 
@@ -1220,17 +1247,8 @@ IF initiated THEN
 
         DKeep_SH_SubState.DKSH_BUF_SET_DR_NORMAL:
           arAxes[EN_Axes.ATC_DR].AxisAutoSetVelocity := Retain_DRParameters[1];
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_CLAMP_ON_CMD;
-
-        DKeep_SH_SubState.DKSH_BUF_CLAMP_ON_CMD:
-          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
-          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_WAIT_CLAMP_ON;
-
-        DKeep_SH_SubState.DKSH_BUF_WAIT_CLAMP_ON:
-          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok THEN
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_PIN2_IN_CMD;
-          END_IF;
-
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_PIN2_IN_CMD;
+		  
         DKeep_SH_SubState.DKSH_BUF_PIN2_IN_CMD:
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := TRUE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := FALSE;
@@ -1239,6 +1257,16 @@ IF initiated THEN
         DKeep_SH_SubState.DKSH_BUF_WAIT_PIN2_IN:
           IF Fmsc_PLC_IO.Shuttle_Pin2_Inside THEN
             Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
+            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_CLAMP_ON_CMD;
+          END_IF;
+		  
+        DKeep_SH_SubState.DKSH_BUF_CLAMP_ON_CMD:
+          Fmsc_PLC_IO.Press_Upper_ClampOn := TRUE;
+		  Fmsc_PLC_IO.Press_Lower_ClampOn := TRUE;
+          DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_WAIT_CLAMP_ON;
+
+        DKeep_SH_SubState.DKSH_BUF_WAIT_CLAMP_ON:
+          IF Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND Fmsc_PLC_IO.Press_Lower_Clamp_Ok THEN
             DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_BUF_PIN1_IN_CMD;
           END_IF;
 
@@ -1408,4 +1436,4 @@ END_IF;
 (* ------------------------------------------------------------ *)
 lastStartCmd := KeepStartCmd;
 
-(* Die_Keeping.V1 *)
+//(* Die_Keeping.V2 *).
