@@ -1,0 +1,979 @@
+FUNCTION_BLOCK State_Machine
+VAR_INPUT 
+  Trigger : BOOL;
+
+  (* Punch worker done inputs *)
+  PUnloadDirectDone      : BOOL;
+  PRelocateDone          : BOOL;
+  PDraggingDone          : BOOL;
+  PDraggingLoadDone      : BOOL;
+  PKeepDone              : BOOL;
+  PLoadDone              : BOOL;
+
+  (* Die worker done inputs *)
+  DUnloadDone : BOOL;
+  DKeepDone   : BOOL;
+  DLoadDone   : BOOL;
+
+  Cycle_Force_Stop : BOOL;
+END_VAR
+
+VAR_OUTPUT RETAIN
+  Busy : BOOL;
+  Done : BOOL;
+  Error : BOOL;
+  ErrorText : STRING(200);
+
+  (* Punch worker start outputs *)
+  PUnloadDirectStartCmd  : BOOL;
+  PRelocateStartCmd      : BOOL;
+  PDraggingStartCmd      : BOOL;
+  PDraggingLoadStartCmd  : BOOL;
+  PKeepStartCmd          : BOOL;
+  PLoadStartCmd          : BOOL;
+
+  (* Die worker start outputs *)
+  DUnloadStartCmd : BOOL;
+  DKeepStartCmd   : BOOL;
+  DLoadStartCmd   : BOOL;
+
+  CurrentPhase : INT := Machine_States.M_IDLE;
+END_VAR
+
+VAR RETAIN
+  i : INT;
+
+  (* Punch work presence *)
+  hasUnloadDirect   : BOOL;
+  hasRelocate       : BOOL;
+  hasDragging       : BOOL;
+  hasDraggingLoad   : BOOL;
+  hasKeep           : BOOL;
+  hasLoadDirect     : BOOL;
+
+  (* Die work presence *)
+  hasDUnload : BOOL;
+  hasDKeep   : BOOL;
+  hasDLoad   : BOOL;
+
+  (* Summary work presence *)
+  hasAnyPunchWork : BOOL;
+  hasAnyDieWork   : BOOL;
+
+  (* execution priority *)
+  PunchFirst : BOOL := TRUE;
+  PrimaryIsPunch : BOOL := TRUE;
+  PrimaryDone : BOOL := FALSE;
+  SecondaryDone : BOOL := FALSE;
+
+  (* internal start latch flags *)
+  startedUnloadDirect  : BOOL;
+  startedRelocate      : BOOL;
+  startedDragging      : BOOL;
+  startedDraggingLoad  : BOOL;
+  startedKeep          : BOOL;
+  startedLoad          : BOOL;
+
+  startedDUnload : BOOL;
+  startedDKeep   : BOOL;
+  startedDLoad   : BOOL;
+
+  (* edge detection *)
+  lastTrigger : BOOL := FALSE;
+  triggerRising : BOOL := FALSE;
+END_VAR
+
+VAR
+  tmpName : STRING(100);
+
+END_VAR
+
+(* Trigger edge detect *)
+triggerRising := Trigger AND NOT lastTrigger;
+
+IF triggerRising AND (CurrentPhase = Machine_States.M_IDLE) THEN
+  Done := FALSE;
+END_IF;
+
+
+(* Force stop has highest priority *)
+IF Cycle_Force_Stop THEN
+
+  CurrentPhase := Machine_States.M_IDLE;
+  Busy := FALSE;
+  Done := FALSE;
+  Error := FALSE;
+  ErrorText := '';
+
+  PUnloadDirectStartCmd := FALSE;
+  PRelocateStartCmd := FALSE;
+  PDraggingStartCmd := FALSE;
+  PDraggingLoadStartCmd := FALSE;
+  PKeepStartCmd := FALSE;
+  PLoadStartCmd := FALSE;
+
+  DUnloadStartCmd := FALSE;
+  DKeepStartCmd := FALSE;
+  DLoadStartCmd := FALSE;
+
+  startedUnloadDirect := FALSE;
+  startedRelocate := FALSE;
+  startedDragging := FALSE;
+  startedDraggingLoad := FALSE;
+  startedKeep := FALSE;
+  startedLoad := FALSE;
+
+  startedDUnload := FALSE;
+  startedDKeep := FALSE;
+  startedDLoad := FALSE;
+
+  hasUnloadDirect := FALSE;
+  hasRelocate := FALSE;
+  hasDragging := FALSE;
+  hasDraggingLoad := FALSE;
+  hasKeep := FALSE;
+  hasLoadDirect := FALSE;
+
+  hasDUnload := FALSE;
+  hasDKeep := FALSE;
+  hasDLoad := FALSE;
+
+  hasAnyPunchWork := FALSE;
+  hasAnyDieWork := FALSE;
+
+  PunchFirst := TRUE;
+  PrimaryIsPunch := TRUE;
+  PrimaryDone := FALSE;
+  SecondaryDone := FALSE;
+
+ELSE
+
+  IF CurrentPhase = Machine_States.M_IDLE THEN
+    Busy := FALSE;
+    Error := FALSE;
+    ErrorText := '';
+
+    PUnloadDirectStartCmd := FALSE;
+    PRelocateStartCmd := FALSE;
+    PDraggingStartCmd := FALSE;
+    PDraggingLoadStartCmd := FALSE;
+    PKeepStartCmd := FALSE;
+    PLoadStartCmd := FALSE;
+
+    DUnloadStartCmd := FALSE;
+    DKeepStartCmd := FALSE;
+    DLoadStartCmd := FALSE;
+
+    startedUnloadDirect := FALSE;
+    startedRelocate := FALSE;
+    startedDragging := FALSE;
+    startedDraggingLoad := FALSE;
+    startedKeep := FALSE;
+    startedLoad := FALSE;
+
+    startedDUnload := FALSE;
+    startedDKeep := FALSE;
+    startedDLoad := FALSE;
+
+    PrimaryDone := FALSE;
+    SecondaryDone := FALSE;
+
+    IF Trigger THEN
+
+      hasUnloadDirect := FALSE;
+      hasRelocate := FALSE;
+      hasDragging := FALSE;
+      hasDraggingLoad := FALSE;
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+
+      hasDUnload := FALSE;
+      hasDKeep := FALSE;
+      hasDLoad := FALSE;
+
+      FOR i := 1 TO 15 DO
+        IF Retain_UnloadPunchList[i,3] <> '' THEN
+          IF Retain_UnloadPunchList[i,2] = '1' THEN
+            hasDragging := TRUE;
+          ELSE
+            hasUnloadDirect := TRUE;
+          END_IF;
+        END_IF;
+
+        IF Retain_RelocatePunchList[i,3] <> '' THEN
+          hasRelocate := TRUE;
+        END_IF;
+
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+
+        IF Retain_UnloadDieList[i,3] <> '' THEN
+          hasDUnload := TRUE;
+        END_IF;
+        IF Retain_KeepDieList[i,3] <> '' THEN
+          hasDKeep := TRUE;
+        END_IF;
+        IF Retain_LoadDieList[i,3] <> '' THEN
+          hasDLoad := TRUE;
+        END_IF;
+      END_FOR;
+
+      hasAnyPunchWork := hasUnloadDirect OR hasRelocate OR hasDragging OR hasDraggingLoad OR hasKeep OR hasLoadDirect;
+      hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+      IF Current_Rack_Type = 2 THEN
+        PunchFirst := FALSE;
+      ELSE
+        PunchFirst := TRUE;
+      END_IF;
+
+      PrimaryIsPunch := PunchFirst;
+
+      IF (NOT hasAnyPunchWork) AND (NOT hasAnyDieWork) THEN
+        CurrentPhase := Machine_States.M_DONE;
+        Done := TRUE;
+      ELSE
+        Busy := TRUE;
+
+        IF PrimaryIsPunch THEN
+          IF hasAnyPunchWork THEN
+            IF hasUnloadDirect THEN
+              CurrentPhase := Machine_States.M_RUN_PUNLOAD_DIRECT;
+            ELSIF hasRelocate THEN
+              CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+            ELSIF hasDragging THEN
+              CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+            ELSIF hasDraggingLoad THEN
+              CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+            ELSIF hasKeep THEN
+              CurrentPhase := Machine_States.M_RUN_PKEEP;
+            ELSIF hasLoadDirect THEN
+              CurrentPhase := Machine_States.M_RUN_PLOAD;
+            END_IF;
+          ELSE
+            PrimaryDone := TRUE;
+            IF hasAnyDieWork THEN
+              IF hasDUnload THEN
+                CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+              ELSIF hasDKeep THEN
+                CurrentPhase := Machine_States.M_RUN_DKEEP;
+              ELSIF hasDLoad THEN
+                CurrentPhase := Machine_States.M_RUN_DLOAD;
+              END_IF;
+            ELSE
+              CurrentPhase := Machine_States.M_DONE;
+            END_IF;
+          END_IF;
+        ELSE
+          IF hasAnyDieWork THEN
+            IF hasDUnload THEN
+              CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+            ELSIF hasDKeep THEN
+              CurrentPhase := Machine_States.M_RUN_DKEEP;
+            ELSIF hasDLoad THEN
+              CurrentPhase := Machine_States.M_RUN_DLOAD;
+            END_IF;
+          ELSE
+            PrimaryDone := TRUE;
+            IF hasAnyPunchWork THEN
+              IF hasUnloadDirect THEN
+                CurrentPhase := Machine_States.M_RUN_PUNLOAD_DIRECT;
+              ELSIF hasRelocate THEN
+                CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+              ELSIF hasDragging THEN
+                CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+              ELSIF hasDraggingLoad THEN
+                CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+              ELSIF hasKeep THEN
+                CurrentPhase := Machine_States.M_RUN_PKEEP;
+              ELSIF hasLoadDirect THEN
+                CurrentPhase := Machine_States.M_RUN_PLOAD;
+              END_IF;
+            ELSE
+              CurrentPhase := Machine_States.M_DONE;
+            END_IF;
+          END_IF;
+        END_IF;
+      END_IF;
+    END_IF;
+
+  (* PUNCH WORKFLOW *)
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PUNLOAD_DIRECT THEN
+
+    IF NOT startedUnloadDirect THEN
+      PUnloadDirectStartCmd := TRUE;
+      startedUnloadDirect := TRUE;
+    END_IF;
+
+    IF PUnloadDirectDone THEN
+      PUnloadDirectStartCmd := FALSE;
+      startedUnloadDirect := FALSE;
+
+      hasRelocate := FALSE;
+      hasDragging := FALSE;
+      hasDraggingLoad := FALSE;
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+
+      FOR i := 1 TO 15 DO
+        IF Retain_RelocatePunchList[i,3] <> '' THEN
+          hasRelocate := TRUE;
+        END_IF;
+        IF Retain_UnloadPunchList[i,3] <> '' THEN
+          IF Retain_UnloadPunchList[i,2] = '1' THEN
+            hasDragging := TRUE;
+          END_IF;
+        END_IF;
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+      END_FOR;
+
+      IF hasRelocate THEN
+        CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+      ELSIF hasDragging THEN
+        CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+      ELSIF hasDraggingLoad THEN
+        CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+      ELSIF hasKeep THEN
+        CurrentPhase := Machine_States.M_RUN_PKEEP;
+      ELSIF hasLoadDirect THEN
+        CurrentPhase := Machine_States.M_RUN_PLOAD;
+      ELSE
+        IF PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasDUnload := FALSE;
+        hasDKeep := FALSE;
+        hasDLoad := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadDieList[i,3] <> '' THEN
+            hasDUnload := TRUE;
+          END_IF;
+          IF Retain_KeepDieList[i,3] <> '' THEN
+            hasDKeep := TRUE;
+          END_IF;
+          IF Retain_LoadDieList[i,3] <> '' THEN
+            hasDLoad := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+        IF hasAnyDieWork AND ((PrimaryIsPunch AND NOT SecondaryDone) OR ((NOT PrimaryIsPunch) AND NOT PrimaryDone)) THEN
+          IF hasDUnload THEN
+            CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+          ELSIF hasDKeep THEN
+            CurrentPhase := Machine_States.M_RUN_DKEEP;
+          ELSIF hasDLoad THEN
+            CurrentPhase := Machine_States.M_RUN_DLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PUnloadDirectStartCmd := TRUE;
+      startedUnloadDirect := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PRELOCATE THEN
+
+    IF NOT startedRelocate THEN
+      PRelocateStartCmd := TRUE;
+      startedRelocate := TRUE;
+    END_IF;
+
+    IF PRelocateDone THEN
+      PRelocateStartCmd := FALSE;
+      startedRelocate := FALSE;
+
+      hasDragging := FALSE;
+      hasDraggingLoad := FALSE;
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+
+      FOR i := 1 TO 15 DO
+        IF Retain_UnloadPunchList[i,3] <> '' THEN
+          IF Retain_UnloadPunchList[i,2] = '1' THEN
+            hasDragging := TRUE;
+          END_IF;
+        END_IF;
+
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+      END_FOR;
+
+      IF hasDragging THEN
+        CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+      ELSIF hasDraggingLoad THEN
+        CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+      ELSIF hasKeep THEN
+        CurrentPhase := Machine_States.M_RUN_PKEEP;
+      ELSIF hasLoadDirect THEN
+        CurrentPhase := Machine_States.M_RUN_PLOAD;
+      ELSE
+        IF PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+        CurrentPhase := Machine_States.M_DONE;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PRelocateStartCmd := TRUE;
+      startedRelocate := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PDRAGGING THEN
+
+    IF NOT startedDragging THEN
+      PDraggingStartCmd := TRUE;
+      startedDragging := TRUE;
+    END_IF;
+
+    IF PDraggingDone THEN
+      PDraggingStartCmd := FALSE;
+      startedDragging := FALSE;
+
+      hasDraggingLoad := FALSE;
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+
+      FOR i := 1 TO 15 DO
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+      END_FOR;
+
+      IF hasDraggingLoad THEN
+        CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+      ELSIF hasKeep THEN
+        CurrentPhase := Machine_States.M_RUN_PKEEP;
+      ELSIF hasLoadDirect THEN
+        CurrentPhase := Machine_States.M_RUN_PLOAD;
+      ELSE
+        IF PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasDUnload := FALSE;
+        hasDKeep := FALSE;
+        hasDLoad := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadDieList[i,3] <> '' THEN
+            hasDUnload := TRUE;
+          END_IF;
+          IF Retain_KeepDieList[i,3] <> '' THEN
+            hasDKeep := TRUE;
+          END_IF;
+          IF Retain_LoadDieList[i,3] <> '' THEN
+            hasDLoad := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+        IF hasAnyDieWork AND ((PrimaryIsPunch AND NOT SecondaryDone) OR ((NOT PrimaryIsPunch) AND NOT PrimaryDone)) THEN
+          IF hasDUnload THEN
+            CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+          ELSIF hasDKeep THEN
+            CurrentPhase := Machine_States.M_RUN_DKEEP;
+          ELSIF hasDLoad THEN
+            CurrentPhase := Machine_States.M_RUN_DLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PDraggingStartCmd := TRUE;
+      startedDragging := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PDRAGGING_LOAD THEN
+
+    IF NOT startedDraggingLoad THEN
+      PDraggingLoadStartCmd := TRUE;
+      startedDraggingLoad := TRUE;
+    END_IF;
+
+    IF PDraggingLoadDone THEN
+      PDraggingLoadStartCmd := FALSE;
+      startedDraggingLoad := FALSE;
+
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+
+      FOR i := 1 TO 15 DO
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+      END_FOR;
+
+      IF hasKeep THEN
+        CurrentPhase := Machine_States.M_RUN_PKEEP;
+      ELSIF hasLoadDirect THEN
+        CurrentPhase := Machine_States.M_RUN_PLOAD;
+      ELSE
+        IF PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasDUnload := FALSE;
+        hasDKeep := FALSE;
+        hasDLoad := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadDieList[i,3] <> '' THEN
+            hasDUnload := TRUE;
+          END_IF;
+          IF Retain_KeepDieList[i,3] <> '' THEN
+            hasDKeep := TRUE;
+          END_IF;
+          IF Retain_LoadDieList[i,3] <> '' THEN
+            hasDLoad := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+        IF hasAnyDieWork AND ((PrimaryIsPunch AND NOT SecondaryDone) OR ((NOT PrimaryIsPunch) AND NOT PrimaryDone)) THEN
+          IF hasDUnload THEN
+            CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+          ELSIF hasDKeep THEN
+            CurrentPhase := Machine_States.M_RUN_DKEEP;
+          ELSIF hasDLoad THEN
+            CurrentPhase := Machine_States.M_RUN_DLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PDraggingLoadStartCmd := TRUE;
+      startedDraggingLoad := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PKEEP THEN
+
+    IF NOT startedKeep THEN
+      PKeepStartCmd := TRUE;
+      startedKeep := TRUE;
+    END_IF;
+
+    IF PKeepDone THEN
+      PKeepStartCmd := FALSE;
+      startedKeep := FALSE;
+
+      hasLoadDirect := FALSE;
+      FOR i := 1 TO 15 DO
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '' THEN
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+      END_FOR;
+
+      IF hasLoadDirect THEN
+        CurrentPhase := Machine_States.M_RUN_PLOAD;
+      ELSE
+        IF PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasDUnload := FALSE;
+        hasDKeep := FALSE;
+        hasDLoad := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadDieList[i,3] <> '' THEN
+            hasDUnload := TRUE;
+          END_IF;
+          IF Retain_KeepDieList[i,3] <> '' THEN
+            hasDKeep := TRUE;
+          END_IF;
+          IF Retain_LoadDieList[i,3] <> '' THEN
+            hasDLoad := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+        IF hasAnyDieWork AND ((PrimaryIsPunch AND NOT SecondaryDone) OR ((NOT PrimaryIsPunch) AND NOT PrimaryDone)) THEN
+          IF hasDUnload THEN
+            CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+          ELSIF hasDKeep THEN
+            CurrentPhase := Machine_States.M_RUN_DKEEP;
+          ELSIF hasDLoad THEN
+            CurrentPhase := Machine_States.M_RUN_DLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PKeepStartCmd := TRUE;
+      startedKeep := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_PLOAD THEN
+
+    IF NOT startedLoad THEN
+      PLoadStartCmd := TRUE;
+      startedLoad := TRUE;
+    END_IF;
+
+    IF PLoadDone THEN
+      PLoadStartCmd := FALSE;
+      startedLoad := FALSE;
+
+      IF PrimaryIsPunch THEN
+        PrimaryDone := TRUE;
+      ELSE
+        SecondaryDone := TRUE;
+      END_IF;
+
+      hasDUnload := FALSE;
+      hasDKeep := FALSE;
+      hasDLoad := FALSE;
+      FOR i := 1 TO 15 DO
+        IF Retain_UnloadDieList[i,3] <> '' THEN
+          hasDUnload := TRUE;
+        END_IF;
+        IF Retain_KeepDieList[i,3] <> '' THEN
+          hasDKeep := TRUE;
+        END_IF;
+        IF Retain_LoadDieList[i,3] <> '' THEN
+          hasDLoad := TRUE;
+        END_IF;
+      END_FOR;
+
+      hasAnyDieWork := hasDUnload OR hasDKeep OR hasDLoad;
+
+      IF hasAnyDieWork AND ((PrimaryIsPunch AND NOT SecondaryDone) OR ((NOT PrimaryIsPunch) AND NOT PrimaryDone)) THEN
+        IF hasDUnload THEN
+          CurrentPhase := Machine_States.M_RUN_DUNLOAD;
+        ELSIF hasDKeep THEN
+          CurrentPhase := Machine_States.M_RUN_DKEEP;
+        ELSIF hasDLoad THEN
+          CurrentPhase := Machine_States.M_RUN_DLOAD;
+        END_IF;
+      ELSE
+        CurrentPhase := Machine_States.M_DONE;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      PLoadStartCmd := TRUE;
+      startedLoad := TRUE;
+    END_IF;
+
+  (* DIE WORKFLOW *)
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_DUNLOAD THEN
+
+    IF NOT startedDUnload THEN
+      DUnloadStartCmd := TRUE;
+      startedDUnload := TRUE;
+    END_IF;
+
+    IF DUnloadDone THEN
+      DUnloadStartCmd := FALSE;
+      startedDUnload := FALSE;
+
+      hasDKeep := FALSE;
+      hasDLoad := FALSE;
+      FOR i := 1 TO 15 DO
+        IF Retain_KeepDieList[i,3] <> '' THEN
+          hasDKeep := TRUE;
+        END_IF;
+        IF Retain_LoadDieList[i,3] <> '' THEN
+          hasDLoad := TRUE;
+        END_IF;
+      END_FOR;
+
+      IF hasDKeep THEN
+        CurrentPhase := Machine_States.M_RUN_DKEEP;
+      ELSIF hasDLoad THEN
+        CurrentPhase := Machine_States.M_RUN_DLOAD;
+      ELSE
+        IF NOT PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasUnloadDirect := FALSE;
+        hasRelocate := FALSE;
+        hasDragging := FALSE;
+        hasDraggingLoad := FALSE;
+        hasKeep := FALSE;
+        hasLoadDirect := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadPunchList[i,3] <> '' THEN
+            IF Retain_UnloadPunchList[i,2] = '1' THEN
+              hasDragging := TRUE;
+            ELSE
+              hasUnloadDirect := TRUE;
+            END_IF;
+          END_IF;
+          IF Retain_RelocatePunchList[i,3] <> '' THEN
+            hasRelocate := TRUE;
+          END_IF;
+          IF Retain_LoadPunchList[i,3] <> '' THEN
+            IF Retain_LoadPunchList[i,2] = '1' THEN
+              hasDraggingLoad := TRUE;
+            ELSE
+              hasLoadDirect := TRUE;
+            END_IF;
+          END_IF;
+          IF Retain_KeepPunchList[i,3] <> '' THEN
+            hasKeep := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyPunchWork := hasUnloadDirect OR hasRelocate OR hasDragging OR hasDraggingLoad OR hasKeep OR hasLoadDirect;
+
+        IF hasAnyPunchWork AND (((NOT PrimaryIsPunch) AND NOT SecondaryDone) OR (PrimaryIsPunch AND NOT PrimaryDone)) THEN
+          IF hasUnloadDirect THEN
+            CurrentPhase := Machine_States.M_RUN_PUNLOAD_DIRECT;
+          ELSIF hasRelocate THEN
+            CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+          ELSIF hasDragging THEN
+            CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+          ELSIF hasDraggingLoad THEN
+            CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+          ELSIF hasKeep THEN
+            CurrentPhase := Machine_States.M_RUN_PKEEP;
+          ELSIF hasLoadDirect THEN
+            CurrentPhase := Machine_States.M_RUN_PLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      DUnloadStartCmd := TRUE;
+      startedDUnload := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_DKEEP THEN
+
+    IF NOT startedDKeep THEN
+      DKeepStartCmd := TRUE;
+      startedDKeep := TRUE;
+    END_IF;
+
+    IF DKeepDone THEN
+      DKeepStartCmd := FALSE;
+      startedDKeep := FALSE;
+
+      hasDLoad := FALSE;
+      FOR i := 1 TO 15 DO
+        IF Retain_LoadDieList[i,3] <> '' THEN
+          hasDLoad := TRUE;
+        END_IF;
+      END_FOR;
+
+      IF hasDLoad THEN
+        CurrentPhase := Machine_States.M_RUN_DLOAD;
+      ELSE
+        IF NOT PrimaryIsPunch THEN
+          PrimaryDone := TRUE;
+        ELSE
+          SecondaryDone := TRUE;
+        END_IF;
+
+        hasUnloadDirect := FALSE;
+        hasRelocate := FALSE;
+        hasDragging := FALSE;
+        hasDraggingLoad := FALSE;
+        hasKeep := FALSE;
+        hasLoadDirect := FALSE;
+        FOR i := 1 TO 15 DO
+          IF Retain_UnloadPunchList[i,3] <> '' THEN
+            IF Retain_UnloadPunchList[i,2] = '1' THEN
+              hasDragging := TRUE;
+            ELSE
+              hasUnloadDirect := TRUE;
+            END_IF;
+          END_IF;
+          IF Retain_RelocatePunchList[i,3] <> '' THEN
+            hasRelocate := TRUE;
+          END_IF;
+          IF Retain_LoadPunchList[i,3] <> '' THEN
+            IF Retain_LoadPunchList[i,2] = '1' THEN
+              hasDraggingLoad := TRUE;
+            ELSE
+              hasLoadDirect := TRUE;
+            END_IF;
+          END_IF;
+          IF Retain_KeepPunchList[i,3] <> '' THEN
+            hasKeep := TRUE;
+          END_IF;
+        END_FOR;
+
+        hasAnyPunchWork := hasUnloadDirect OR hasRelocate OR hasDragging OR hasDraggingLoad OR hasKeep OR hasLoadDirect;
+
+        IF hasAnyPunchWork AND (((NOT PrimaryIsPunch) AND NOT SecondaryDone) OR (PrimaryIsPunch AND NOT PrimaryDone)) THEN
+          IF hasUnloadDirect THEN
+            CurrentPhase := Machine_States.M_RUN_PUNLOAD_DIRECT;
+          ELSIF hasRelocate THEN
+            CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+          ELSIF hasDragging THEN
+            CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+          ELSIF hasDraggingLoad THEN
+            CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+          ELSIF hasKeep THEN
+            CurrentPhase := Machine_States.M_RUN_PKEEP;
+          ELSIF hasLoadDirect THEN
+            CurrentPhase := Machine_States.M_RUN_PLOAD;
+          END_IF;
+        ELSE
+          CurrentPhase := Machine_States.M_DONE;
+        END_IF;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      DKeepStartCmd := TRUE;
+      startedDKeep := TRUE;
+    END_IF;
+
+  ELSIF CurrentPhase = Machine_States.M_RUN_DLOAD THEN
+
+    IF NOT startedDLoad THEN
+      DLoadStartCmd := TRUE;
+      startedDLoad := TRUE;
+    END_IF;
+
+    IF DLoadDone THEN
+      DLoadStartCmd := FALSE;
+      startedDLoad := FALSE;
+
+      IF NOT PrimaryIsPunch THEN
+        PrimaryDone := TRUE;
+      ELSE
+        SecondaryDone := TRUE;
+      END_IF;
+
+      hasUnloadDirect := FALSE;
+      hasRelocate := FALSE;
+      hasDragging := FALSE;
+      hasDraggingLoad := FALSE;
+      hasKeep := FALSE;
+      hasLoadDirect := FALSE;
+      FOR i := 1 TO 15 DO
+        IF Retain_UnloadPunchList[i,3] <> '' THEN
+          IF Retain_UnloadPunchList[i,2] = '1' THEN
+            hasDragging := TRUE;
+          ELSE
+            hasUnloadDirect := TRUE;
+          END_IF;
+        END_IF;
+        IF Retain_RelocatePunchList[i,3] <> '' THEN
+          hasRelocate := TRUE;
+        END_IF;
+        IF Retain_LoadPunchList[i,3] <> '' THEN
+          IF Retain_LoadPunchList[i,2] = '1' THEN
+            hasDraggingLoad := TRUE;
+          ELSE
+            hasLoadDirect := TRUE;
+          END_IF;
+        END_IF;
+        IF Retain_KeepPunchList[i,3] <> '' THEN
+          hasKeep := TRUE;
+        END_IF;
+      END_FOR;
+
+      hasAnyPunchWork := hasUnloadDirect OR hasRelocate OR hasDragging OR hasDraggingLoad OR hasKeep OR hasLoadDirect;
+
+      IF hasAnyPunchWork AND (((NOT PrimaryIsPunch) AND NOT SecondaryDone) OR (PrimaryIsPunch AND NOT PrimaryDone)) THEN
+        IF hasUnloadDirect THEN
+          CurrentPhase := Machine_States.M_RUN_PUNLOAD_DIRECT;
+        ELSIF hasRelocate THEN
+          CurrentPhase := Machine_States.M_RUN_PRELOCATE;
+        ELSIF hasDragging THEN
+          CurrentPhase := Machine_States.M_RUN_PDRAGGING;
+        ELSIF hasDraggingLoad THEN
+          CurrentPhase := Machine_States.M_RUN_PDRAGGING_LOAD;
+        ELSIF hasKeep THEN
+          CurrentPhase := Machine_States.M_RUN_PKEEP;
+        ELSIF hasLoadDirect THEN
+          CurrentPhase := Machine_States.M_RUN_PLOAD;
+        END_IF;
+      ELSE
+        CurrentPhase := Machine_States.M_DONE;
+      END_IF;
+
+    ELSIF triggerRising THEN
+      DLoadStartCmd := TRUE;
+      startedDLoad := TRUE;
+    END_IF;
+
+  (* DONE *)
+  ELSIF CurrentPhase = Machine_States.M_DONE THEN
+    Busy := FALSE;
+    Done := TRUE;
+    CurrentPhase := Machine_States.M_IDLE;
+  END_IF;
+
+END_IF;
+
+lastTrigger := Trigger;
+
+(* State_Machine.V1 *)
+
