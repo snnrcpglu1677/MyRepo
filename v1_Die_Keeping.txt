@@ -142,7 +142,6 @@ VAR
   KeepPosEps               : LREAL := 0.01;
   ZOffset                  : LREAL;
 END_VAR
-
 (* ------------------------------------------------------------ *)
 (* Derived control                                              *)
 (* ------------------------------------------------------------ *)
@@ -436,49 +435,50 @@ IF initiated THEN
 
 
         DKeep_SH_SubState.DKSH_ANALYZE_CHECK_TARGET:
-          FOR i := 1 TO 15 DO
-            IF DieActive[i] AND (NOT DieDone[i]) THEN
-
-              IF (ABS(CurrentRangeStart[i] - NewRangeStart[i]) <= PosEps) AND
-                 (ABS(CurrentRangeEnd[i] - NewRangeEnd[i]) <= PosEps) THEN
-                DieDone[i] := TRUE;
-                MoveTypeCandidate[i] := 1; (* NO_MOVE *)
-              ELSE
-                overlapFound := FALSE;
-
-                FOR j := 1 TO 15 DO
-                  IF (j <> i) AND DieActive[j] AND (NOT DieDone[j]) THEN
-                    IF (NewRangeEnd[i] > CurrentRangeStart[j]) AND (NewRangeStart[i] < CurrentRangeEnd[j]) THEN
-                      overlapFound := TRUE;
-                      EXIT;
-                    END_IF;
-                  END_IF;
-                END_FOR;
-
-                TargetBlocked[i] := overlapFound;
-
-                IF overlapFound THEN
-                  MoveTypeCandidate[i] := 4; (* BLOCKED *)
-                  BlockedCount := BlockedCount + 1;
-                  BlockedCandidateIndex[BlockedCount] := i;
-                END_IF;
-              END_IF;
-            END_IF;
-          END_FOR;
-
-          RemainingCount := 0;
-          FOR i := 1 TO 15 DO
-            IF DieActive[i] AND (NOT DieDone[i]) THEN
-              RemainingCount := RemainingCount + 1;
-            END_IF;
-          END_FOR;
-
-          IF RemainingCount = 0 THEN
-            Local_Shuttle_State := Shuttle_States.S_KEEP_DONE;
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_FINISHED;
-          ELSE
-            DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_ANALYZE_CHECK_SWEEP;
-          END_IF;
+		  FOR i := 1 TO 15 DO
+			IF DieActive[i] AND (NOT DieDone[i]) THEN
+		
+			  IF (ABS(CurrentRangeStart[i] - NewRangeStart[i]) <= PosEps) AND
+				 (ABS(CurrentRangeEnd[i] - NewRangeEnd[i]) <= PosEps) THEN
+				DieDone[i] := TRUE;
+				MoveTypeCandidate[i] := 1; (* NO_MOVE *)
+			  ELSE
+				overlapFound := FALSE;
+		
+				FOR j := 1 TO 15 DO
+				  IF (j <> i) AND DieActive[j] AND (NOT DieDone[j]) THEN
+					IF (NewRangeEnd[i] > CurrentRangeStart[j]) AND
+					   (NewRangeStart[i] < CurrentRangeEnd[j]) THEN
+					  overlapFound := TRUE;
+					  EXIT;
+					END_IF;
+				  END_IF;
+				END_FOR;
+		
+				TargetBlocked[i] := overlapFound;
+		
+				IF overlapFound THEN
+				  MoveTypeCandidate[i] := 4; (* BLOCKED *)
+				  BlockedCount := BlockedCount + 1;
+				  BlockedCandidateIndex[BlockedCount] := i;
+				END_IF;
+			  END_IF;
+			END_IF;
+		  END_FOR;
+		
+		  RemainingCount := 0;
+		  FOR i := 1 TO 15 DO
+			IF DieActive[i] AND (NOT DieDone[i]) THEN
+			  RemainingCount := RemainingCount + 1;
+			END_IF;
+		  END_FOR;
+		
+		  IF RemainingCount = 0 THEN
+			Local_Shuttle_State := Shuttle_States.S_KEEP_DONE;
+			DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_FINISHED;
+		  ELSE
+			DKeep_SH_SubStates := DKeep_SH_SubState.DKSH_ANALYZE_CHECK_SWEEP;
+		  END_IF;
 
 
         DKeep_SH_SubState.DKSH_ANALYZE_CHECK_SWEEP:
@@ -1407,3 +1407,5 @@ END_IF;
 (* Edge memory update                                           *)
 (* ------------------------------------------------------------ *)
 lastStartCmd := KeepStartCmd;
+
+(* Die_Keeping.V1 *)
