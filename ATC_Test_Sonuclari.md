@@ -62,4 +62,5 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Changer sonucu (2026-11-26):** Kullanıcı `ATC_TEST4` load talebinde
   PunchChanger'ın `ACTION_REQUIRED`, DieChanger'ın `NO_ACTION` verdiğini
   bildirdi; bu karar beklenen sonuçla uyumlu.
-- **Fiziksel hareket ve son durum:** Henüz bildirilmedi; test devam ediyor.
+- **Fiziksel hareket:** Kullanıcı henüz hareketin başlamadığını bildirdi.
+  Son durum ve hareket sonucu henüz bildirilmedi; test devam ediyor.
