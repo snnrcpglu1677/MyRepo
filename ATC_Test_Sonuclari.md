@@ -109,3 +109,11 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   doğruladı.
 - **Sonuç:** Yalnızca 200 boy die boşaltıldı; diğer takımlara dokunulmadı.
   Kullanıcı testi başarılı olarak bildirdi.
+
+## T09 — Mevcut takımları koruyup direct punch ekleme
+
+- **Tarih:** 2026-11-27
+- **Plan:** `ATC_TEST5` temel alınarak mevcut 255 boy punch ve die korunacak,
+  40 boy, horn 0 direct punch eklenecek.
+- **Sonuç:** Kullanıcı testin başarılı olduğunu bildirdi. Program adı,
+  gerçekleşen slotlar, pozisyonlar ve ara liste sonuçları bildirilmedi.
