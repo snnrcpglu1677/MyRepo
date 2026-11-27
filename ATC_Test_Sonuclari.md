@@ -66,3 +66,13 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   Punch_Keeping, BIU-031 boy 255 punch'ı direct slide ile abkant üzerinde
   1400 pozisyonundan 1500 pozisyonuna kaydırdı.
 - **Die ve PLC kayıtlarının son durumu:** Henüz ayrıca bildirilmedi.
+
+## T05 — Aynı die'ın pozisyonunu değiştirme (planlandı)
+
+- **Tarih:** 2026-11-27
+- **Program:** `ATC_TEST5`, `ATC_TEST4` temel alınarak hazırlanacak.
+- **Plan:** Punch, `ATC_TEST4` ile aynı takım ve pozisyonda kalacak;
+  die, `ATC_TEST4` pozisyonundan 100 sağa kaydırılacak.
+- **Beklenti:** PunchChanger `NO_ACTION`, DieChanger `ACTION_REQUIRED`;
+  punch keeping çalıştırılırsa `NO_MOVE`, die keeping uygun koşullarda
+  `DIRECT_SLIDE`. Test ve son fiziksel durum henüz bildirilmedi.
