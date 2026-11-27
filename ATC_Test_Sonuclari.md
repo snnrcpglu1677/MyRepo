@@ -117,3 +117,11 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   40 boy, horn 0 direct punch eklenecek.
 - **Sonuç:** Kullanıcı testin başarılı olduğunu bildirdi. Program adı,
   gerçekleşen slotlar, pozisyonlar ve ara liste sonuçları bildirilmedi.
+
+## T10 — Eklenen direct punch'ı seçerek boşaltma
+
+- **Tarih:** 2026-11-27
+- **Plan:** `ATC_TEST5` load edilerek 40 boy punch'ın boşaltılması,
+  255 boy punch ve die'ın yerinde tutulması önerildi.
+- **Sonuç:** Kullanıcı testin başarılı olduğunu bildirdi. Hareket detayları,
+  listeler ve son fiziksel durum ayrıca bildirilmedi.
