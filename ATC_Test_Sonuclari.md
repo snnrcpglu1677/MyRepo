@@ -50,7 +50,7 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Son fiziksel durum:** Kullanıcı 255 boy BIU-031 punch'ın abkantta takılı
   olduğunu doğruladı. Die'ın son fiziksel durumu henüz bildirilmedi.
 
-## T04 — Aynı punch'ın pozisyonunu değiştirme (devam ediyor)
+## T04 — Aynı punch'ın pozisyonunu değiştirme
 
 - **Tarih:** 2026-11-25
 - **Abkant programı:** `ATC_TEST4`.
@@ -62,5 +62,7 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Changer sonucu (2026-11-26):** Kullanıcı `ATC_TEST4` load talebinde
   PunchChanger'ın `ACTION_REQUIRED`, DieChanger'ın `NO_ACTION` verdiğini
   bildirdi; bu karar beklenen sonuçla uyumlu.
-- **Fiziksel hareket:** Kullanıcı henüz hareketin başlamadığını bildirdi.
-  Son durum ve hareket sonucu henüz bildirilmedi; test devam ediyor.
+- **İkinci aşama (2026-11-27):** Kullanıcı testin başarılı olduğunu bildirdi.
+  Punch_Keeping, BIU-031 boy 255 punch'ı direct slide ile abkant üzerinde
+  1400 pozisyonundan 1500 pozisyonuna kaydırdı.
+- **Die ve PLC kayıtlarının son durumu:** Henüz ayrıca bildirilmedi.
