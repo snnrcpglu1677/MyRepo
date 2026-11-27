@@ -3,6 +3,7 @@ import sys
 import time
 import sqlite3
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from opcua import Client
 
 
@@ -212,6 +213,19 @@ def create_empty_matrix(rows=15, cols=12):
     return [["" for _ in range(cols)] for _ in range(rows)]
 
 
+def center_position(row, tool_type, row_index):
+    try:
+        position = Decimal(str(row.get("Z position", "")))
+        length = Decimal(str(row.get("Length", "")))
+    except InvalidOperation as exc:
+        raise ValueError(f"{tool_type} satır {row_index}: geçersiz Z pozisyonu veya boy") from exc
+
+    if not position.is_finite() or not length.is_finite() or length <= 0:
+        raise ValueError(f"{tool_type} satır {row_index}: geçersiz Z pozisyonu veya boy")
+
+    return format(position + length / 2, "f")
+
+
 def find_child_by_name(parent, target_name):
     children = parent.get_children()
     for child in children:
@@ -277,6 +291,25 @@ def find_atc_node(client):
 
 
 def write_to_codesys(product_name, punch_rows, die_rows):
+    pfields_matrix = create_empty_matrix(15, 12)
+    dfields_matrix = create_empty_matrix(15, 12)
+
+    max_punch_count = min(len(punch_rows), 15)
+    for i in range(max_punch_count):
+        punch = punch_rows[i]
+        pfields_matrix[i][2] = str(punch.get("Name", ""))
+        pfields_matrix[i][5] = center_position(punch, "Punch", i + 1)
+        pfields_matrix[i][6] = str(punch.get("Length", ""))
+        pfields_matrix[i][7] = str(punch.get("Rotation", ""))
+        pfields_matrix[i][8] = str(punch.get("Horn", ""))
+
+    max_die_count = min(len(die_rows), 15)
+    for i in range(max_die_count):
+        die = die_rows[i]
+        dfields_matrix[i][2] = str(die.get("Name", ""))
+        dfields_matrix[i][5] = center_position(die, "Die", i + 1)
+        dfields_matrix[i][6] = str(die.get("Length", ""))
+
     client = Client(OPC_WRITE_SERVER_URL)
 
     try:
@@ -295,25 +328,6 @@ def write_to_codesys(product_name, punch_rows, die_rows):
         product_name_node = find_child_by_name(atc_node, "Product_Name")
         if product_name_node is None:
             raise Exception("Product_Name node bulunamadı.")
-
-        pfields_matrix = create_empty_matrix(15, 12)
-        dfields_matrix = create_empty_matrix(15, 12)
-
-        max_punch_count = min(len(punch_rows), 15)
-        for i in range(max_punch_count):
-            punch = punch_rows[i]
-            pfields_matrix[i][2] = str(punch.get("Name", ""))
-            pfields_matrix[i][5] = str(punch.get("Z position", ""))
-            pfields_matrix[i][6] = str(punch.get("Length", ""))
-            pfields_matrix[i][7] = str(punch.get("Rotation", ""))
-            pfields_matrix[i][8] = str(punch.get("Horn", ""))
-
-        max_die_count = min(len(die_rows), 15)
-        for i in range(max_die_count):
-            die = die_rows[i]
-            dfields_matrix[i][2] = str(die.get("Name", ""))
-            dfields_matrix[i][5] = str(die.get("Z position", ""))
-            dfields_matrix[i][6] = str(die.get("Length", ""))
 
         pfields_node.set_value(pfields_matrix)
         dfields_node.set_value(dfields_matrix)
@@ -416,4 +430,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# ReadDb.V1
+# ReadDb.V2
