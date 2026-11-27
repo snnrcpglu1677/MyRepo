@@ -98,3 +98,14 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Sonuç:** Kullanıcı `ATC_TEST6` load edildiğinde mevcut punch ve die'a
   dokunulmadığını, yalnızca yeni 200 boy die'ın yüklendiğini bildirdi.
   Test başarılı; changer sonuçları ve pozisyonlar ayrıca bildirilmedi.
+
+## T08 — Eklenen die'ı seçerek boşaltma
+
+- **Tarih:** 2026-11-27
+- **Program:** `ATC_TEST5` load edildi.
+- **Changer ve listeler:** Punch `NO_ACTION`, die `ACTION_REQUIRED` verdi.
+  Kullanıcı unload listesinde yalnızca 200 boy die, keep listesinde 255 boy
+  die olduğunu ve unload drawer/slot bilgilerinin fiziksel kayıtla uyumunu
+  doğruladı.
+- **Sonuç:** Yalnızca 200 boy die boşaltıldı; diğer takımlara dokunulmadı.
+  Kullanıcı testi başarılı olarak bildirdi.
