@@ -67,7 +67,7 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   1400 pozisyonundan 1500 pozisyonuna kaydırdı.
 - **Die ve PLC kayıtlarının son durumu:** Henüz ayrıca bildirilmedi.
 
-## T05 — Aynı die'ın pozisyonunu değiştirme (planlandı)
+## T05 — Aynı die'ın pozisyonunu değiştirme
 
 - **Tarih:** 2026-11-27
 - **Program:** `ATC_TEST5`, `ATC_TEST4` temel alınarak hazırlanacak.
@@ -75,4 +75,8 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   die, `ATC_TEST4` pozisyonundan 100 sağa kaydırılacak.
 - **Beklenti:** PunchChanger `NO_ACTION`, DieChanger `ACTION_REQUIRED`;
   punch keeping çalıştırılırsa `NO_MOVE`, die keeping uygun koşullarda
-  `DIRECT_SLIDE`. Test ve son fiziksel durum henüz bildirilmedi.
+  `DIRECT_SLIDE`.
+- **Sonuç:** Kullanıcı PunchChanger'ın `NO_ACTION`, DieChanger'ın
+  `ACTION_REQUIRED` verdiğini ve Die_Keeping'in `DIRECT_SLIDE` işlemini
+  başarıyla yaptığını bildirdi. Gerçek die koordinatları, punch keeping
+  davranışı ve PLC kayıtlarının son durumu ayrıca bildirilmedi.
