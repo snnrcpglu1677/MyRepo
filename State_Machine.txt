@@ -620,7 +620,7 @@ ELSE
       hasLoadDirect := FALSE;
       FOR i := 1 TO 15 DO
         IF Retain_LoadPunchList[i,3] <> '' THEN
-          IF Retain_LoadPunchList[i,2] = '' THEN
+          IF Retain_LoadPunchList[i,2] = '0' THEN
             hasLoadDirect := TRUE;
           END_IF;
         END_IF;
@@ -975,5 +975,5 @@ END_IF;
 
 lastTrigger := Trigger;
 
-(* State_Machine.V1 *)
+(* State_Machine.V2 *)
 
