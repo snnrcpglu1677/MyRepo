@@ -87,3 +87,13 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
 - **Program:** `ATC_TEST5` tekrar load ile talep edildi.
 - **Sonuç:** Kullanıcı her iki changer'ın `NO_ACTION` verdiğini ve herhangi
   bir hareket oluşmadığını bildirdi. Test başarılı.
+
+## T07 — Mevcut takımları koruyup die ekleme (devam ediyor)
+
+- **Tarih:** 2026-11-27
+- **Program:** `ATC_TEST6`, `ATC_TEST5` temel alınarak hazırlandı; bir adet
+  200 boy die eklendi.
+- **Beklenti:** Mevcut punch ve ilk die hareket etmeden kalacak; yalnızca yeni
+  die load edilecek.
+- **Durum:** Changer sonuçları, pozisyonlar ve fiziksel test sonucu henüz
+  bildirilmedi.
