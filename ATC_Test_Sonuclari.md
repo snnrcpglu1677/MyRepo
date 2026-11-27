@@ -80,3 +80,10 @@ Pozisyonlar ve ara liste içerikleri bu test için bildirilmedi.
   `ACTION_REQUIRED` verdiğini ve Die_Keeping'in `DIRECT_SLIDE` işlemini
   başarıyla yaptığını bildirdi. Gerçek die koordinatları, punch keeping
   davranışı ve PLC kayıtlarının son durumu ayrıca bildirilmedi.
+
+## T06 — ATC_TEST5 programını tekrar yükleme
+
+- **Tarih:** 2026-11-27
+- **Program:** `ATC_TEST5` tekrar load ile talep edildi.
+- **Sonuç:** Kullanıcı her iki changer'ın `NO_ACTION` verdiğini ve herhangi
+  bir hareket oluşmadığını bildirdi. Test başarılı.
