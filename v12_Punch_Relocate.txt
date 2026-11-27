@@ -278,8 +278,19 @@ IF risingStart AND (NOT initiated) THEN
     Local_Shuttle_State := Shuttle_States.SH_IDLE;
     PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_IDLE;
   ELSE
+    (* Hesaplanan hedefler Z limitini asarsa hareket baslamadan hata *)
+    FOR i := 1 TO 15 DO
+      IF RelocateActive[i] AND (RelocateTargetZ[i] > REAL_TO_LREAL(Retain_ZParameters[18])) THEN
+        RelocateError := TRUE;
+      END_IF;
+    END_FOR;
+
     Local_Shuttle_State := Shuttle_States.PRG_Proccesing;
-    PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_INIT_START;
+    IF RelocateError THEN
+      PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+    ELSE
+      PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_INIT_START;
+    END_IF;
   END_IF;
 END_IF;
 
@@ -530,11 +541,16 @@ IF initiated THEN
           END_IF;
 
         PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_REQ:
-          arAxes[EN_Axes.ATC_Z].TargetPos := RelocateTargetZ[Current_PunchIndex] + CurrentHoleOffset;
-          arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
-          SH_Z_MoveRequested := TRUE;
-          SH_Z_Done := FALSE;
-          PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_WAIT;
+          IF (RelocateTargetZ[Current_PunchIndex] + CurrentHoleOffset) > REAL_TO_LREAL(Retain_ZParameters[18]) THEN
+            RelocateError := TRUE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_ERROR;
+          ELSE
+            arAxes[EN_Axes.ATC_Z].TargetPos := RelocateTargetZ[Current_PunchIndex] + CurrentHoleOffset;
+            arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
+            SH_Z_MoveRequested := TRUE;
+            SH_Z_Done := FALSE;
+            PRelocate_SH_SubStates := PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_WAIT;
+          END_IF;
 
         PunchRelocate_SH_SubState.PRSH_Z_RELOCATE_SAFE_WAIT:
           IF ABS(arAxes[EN_Axes.ATC_Z].ActualPos - arAxes[EN_Axes.ATC_Z].TargetPos) <= KeepPosEps THEN
@@ -741,4 +757,4 @@ END_IF;
 (* Edge memory update *)
 (* ------------------------------------------------------------ *)
 lastStartCmd := RelocateStartCmd;
-(* Punch_Relocate.V12: Relocate hedef Z hesabi eklendi (max PFields/PFields_Old + 150, sonrakiler onceki boy/2 + boy/2 + 20) ve PunchHoleOffset pick/relocate Z hedeflerine eklendi. Drawer/slot indeks kontrolu eklendi. Derlenmedi, makinede denenmedi. *)
+(* Punch_Relocate.V12: Relocate hedef Z hesabi eklendi (max PFields/PFields_Old + 150, sonrakiler onceki boy/2 + boy/2 + 20) ve PunchHoleOffset pick/relocate Z hedeflerine eklendi. Drawer/slot indeks kontrolu eklendi. Hedef Z, Retain_ZParameters[18] limitini asarsa hata verir (start'ta nominal, hareket oncesi offsetli). Derlenmedi, makinede denenmedi. *)
