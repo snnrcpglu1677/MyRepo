@@ -150,6 +150,9 @@ VAR
   tmpHornStr               : STRING[32];
   tmpDrawerStr             : STRING[32];
   tmpDrawerSlotStr         : STRING[32];
+  OffsetCheckText          : STRING[32];
+  OffsetCheckChar          : STRING[1];
+  OffsetCheckValid         : BOOL;
 
   (* Optional timers if needed later *)
   ClampOff_Timer           : TON;
@@ -158,18 +161,21 @@ VAR
   ZOffset                  : LREAL;
 END_VAR
 
+
 (* ------------------------------------------------------------ *)
 (* Derived control *)
 (* ------------------------------------------------------------ *)
 AutoRunEnable := Automatic_Page AND General_Start AND (NOT General_Stop);
 risingStart := KeepStartCmd AND NOT lastStartCmd;
 ZOffset := REAL_TO_LREAL(Retain_ZParameters[19]);
+ClampOff_Timer(PT := TO_TIME(TO_INT(Retain_GeneralParameters[4] * 1000)));
 
 
 (* ------------------------------------------------------------ *)
 (* HARD ABORT *)
 (* ------------------------------------------------------------ *)
 IF Abort_Cycle THEN
+  ClampOff_Timer.IN := FALSE;
   KeepStartAck := FALSE;
   KeepBusy := FALSE;
   KeepDone := FALSE;
@@ -269,6 +275,7 @@ END_IF;
 (* START *)
 (* ------------------------------------------------------------ *)
 IF risingStart AND (NOT initiated) THEN
+  ClampOff_Timer.IN := FALSE;
   KeepStartAck := TRUE;
   KeepBusy := TRUE;
   KeepDone := FALSE;
@@ -383,6 +390,46 @@ IF initiated THEN
                 KeepCount := KeepCount + 1;
                 PunchActive[i] := TRUE;
 
+                tmpDrawerStr := Retain_KeepPunchList[i,10];
+                tmpDrawerSlotStr := Retain_KeepPunchList[i,11];
+                OffsetCheckValid := TRUE;
+                FOR j := 1 TO 2 DO
+                  IF j = 1 THEN
+                    OffsetCheckText := tmpDrawerStr;
+                  ELSE
+                    OffsetCheckText := tmpDrawerSlotStr;
+                  END_IF;
+                  IF (LEN(OffsetCheckText) < 1) OR (LEN(OffsetCheckText) > 2) THEN
+                    OffsetCheckValid := FALSE;
+                  ELSE
+                    FOR k := 1 TO LEN(OffsetCheckText) DO
+                      OffsetCheckChar := MID(OffsetCheckText, 1, k);
+                      IF (OffsetCheckChar < '0') OR (OffsetCheckChar > '9') THEN
+                        OffsetCheckValid := FALSE;
+                      END_IF;
+                    END_FOR;
+                  END_IF;
+                END_FOR;
+                IF OffsetCheckValid THEN
+                  tmpInt := STRING_TO_INT(tmpDrawerStr);
+                  tmpInt2 := STRING_TO_INT(tmpDrawerSlotStr);
+                  IF (tmpInt < 1) OR (tmpInt > 16) OR (tmpInt2 < 1) OR (tmpInt2 > 15) THEN
+                    OffsetCheckValid := FALSE;
+                  END_IF;
+                END_IF;
+                IF NOT OffsetCheckValid THEN
+                  ErrorText := 'INVALID: keep punch drawer/slot for hole offset';
+                  KeepError := TRUE;
+                  KeepBusy := FALSE;
+                  KeepDone := FALSE;
+                  KeepStartAck := FALSE;
+                  initiated := FALSE;
+                  Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+                  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+                  lastStartCmd := KeepStartCmd;
+                  RETURN;
+                END_IF;
+
                 IF Retain_KeepPunchList[i,12] <> '' THEN
                   KeepOldIndex[i] := STRING_TO_INT(Retain_KeepPunchList[i,12]);
                 ELSE
@@ -418,18 +465,19 @@ IF initiated THEN
                 END_IF;
 
                 tmpHalfWidth := KeepWidth[i] / 2.0;
+                tmpLReal := REAL_TO_LREAL(PunchHoleOffset[tmpInt, tmpInt2]);
 
-                OldRangeStart[i] := KeepOldZ[i] - tmpHalfWidth;
-                OldRangeEnd[i] := KeepOldZ[i] + tmpHalfWidth;
+                OldRangeStart[i] := KeepOldZ[i] + tmpLReal - tmpHalfWidth;
+                OldRangeEnd[i] := KeepOldZ[i] + tmpLReal + tmpHalfWidth;
 
-                CurrentRangeStart[i] := KeepCurrentZ[i] - tmpHalfWidth;
-                CurrentRangeEnd[i] := KeepCurrentZ[i] + tmpHalfWidth;
+                CurrentRangeStart[i] := KeepCurrentZ[i] + tmpLReal - tmpHalfWidth;
+                CurrentRangeEnd[i] := KeepCurrentZ[i] + tmpLReal + tmpHalfWidth;
 
-                NewRangeStart[i] := KeepNewZ[i] - tmpHalfWidth;
-                NewRangeEnd[i] := KeepNewZ[i] + tmpHalfWidth;
+                NewRangeStart[i] := KeepNewZ[i] + tmpLReal - tmpHalfWidth;
+                NewRangeEnd[i] := KeepNewZ[i] + tmpLReal + tmpHalfWidth;
 
-                SweepStart[i] := MIN(KeepCurrentZ[i], KeepNewZ[i]) - tmpHalfWidth;
-                SweepEnd[i] := MAX(KeepCurrentZ[i], KeepNewZ[i]) + tmpHalfWidth;
+                SweepStart[i] := MIN(KeepCurrentZ[i], KeepNewZ[i]) + tmpLReal - tmpHalfWidth;
+                SweepEnd[i] := MAX(KeepCurrentZ[i], KeepNewZ[i]) + tmpLReal + tmpHalfWidth;
               END_IF;
             END_FOR;
 
@@ -462,6 +510,46 @@ IF initiated THEN
               IF (NOT IsKeepRow[i]) AND (PFields_Old[i,3] <> '') THEN
                 ObstacleActive[i] := TRUE;
 
+                tmpDrawerStr := PFields_Old[i,10];
+                tmpDrawerSlotStr := PFields_Old[i,11];
+                OffsetCheckValid := TRUE;
+                FOR j := 1 TO 2 DO
+                  IF j = 1 THEN
+                    OffsetCheckText := tmpDrawerStr;
+                  ELSE
+                    OffsetCheckText := tmpDrawerSlotStr;
+                  END_IF;
+                  IF (LEN(OffsetCheckText) < 1) OR (LEN(OffsetCheckText) > 2) THEN
+                    OffsetCheckValid := FALSE;
+                  ELSE
+                    FOR k := 1 TO LEN(OffsetCheckText) DO
+                      OffsetCheckChar := MID(OffsetCheckText, 1, k);
+                      IF (OffsetCheckChar < '0') OR (OffsetCheckChar > '9') THEN
+                        OffsetCheckValid := FALSE;
+                      END_IF;
+                    END_FOR;
+                  END_IF;
+                END_FOR;
+                IF OffsetCheckValid THEN
+                  tmpInt := STRING_TO_INT(tmpDrawerStr);
+                  tmpInt2 := STRING_TO_INT(tmpDrawerSlotStr);
+                  IF (tmpInt < 1) OR (tmpInt > 16) OR (tmpInt2 < 1) OR (tmpInt2 > 15) THEN
+                    OffsetCheckValid := FALSE;
+                  END_IF;
+                END_IF;
+                IF NOT OffsetCheckValid THEN
+                  ErrorText := 'INVALID: obstacle punch drawer/slot for hole offset';
+                  KeepError := TRUE;
+                  KeepBusy := FALSE;
+                  KeepDone := FALSE;
+                  KeepStartAck := FALSE;
+                  initiated := FALSE;
+                  Local_Shuttle_State := Shuttle_States.S_KEEP_ERROR;
+                  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_ERROR;
+                  lastStartCmd := KeepStartCmd;
+                  RETURN;
+                END_IF;
+
                 tmpWidth := 0.0;
                 IF PFields_Old[i,7] <> '' THEN
                   tmpWidth := STRING_TO_LREAL(PFields_Old[i,7]);
@@ -471,6 +559,7 @@ IF initiated THEN
                 IF PFields_Old[i,6] <> '' THEN
                   tmpLReal := STRING_TO_LREAL(PFields_Old[i,6]) + ZOffset;
                 END_IF;
+                tmpLReal := tmpLReal + REAL_TO_LREAL(PunchHoleOffset[tmpInt, tmpInt2]);
 
                 ObstacleStart[i] := tmpLReal - (tmpWidth / 2.0);
                 ObstacleEnd[i] := tmpLReal + (tmpWidth / 2.0);
@@ -626,12 +715,12 @@ IF initiated THEN
             IF tmpInt <> 0 THEN
               IF NOT candidateFound THEN
                 SelectedPunchIndex := tmpInt;
-                tmpLReal := KeepCurrentZ[tmpInt];
+                tmpLReal := CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0);
                 candidateFound := TRUE;
               ELSE
-                IF KeepCurrentZ[tmpInt] < tmpLReal THEN
+                IF CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0) < tmpLReal THEN
                   SelectedPunchIndex := tmpInt;
-                  tmpLReal := KeepCurrentZ[tmpInt];
+                  tmpLReal := CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0);
                 END_IF;
               END_IF;
             END_IF;
@@ -652,12 +741,12 @@ IF initiated THEN
               IF tmpInt <> 0 THEN
                 IF NOT candidateFound THEN
                   SelectedPunchIndex := tmpInt;
-                  tmpLReal := KeepCurrentZ[tmpInt];
+                  tmpLReal := CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0);
                   candidateFound := TRUE;
                 ELSE
-                  IF KeepCurrentZ[tmpInt] < tmpLReal THEN
+                  IF CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0) < tmpLReal THEN
                     SelectedPunchIndex := tmpInt;
-                    tmpLReal := KeepCurrentZ[tmpInt];
+                    tmpLReal := CurrentRangeStart[tmpInt] + (KeepWidth[tmpInt] / 2.0);
                   END_IF;
                 END_IF;
               END_IF;
@@ -678,12 +767,12 @@ IF initiated THEN
                 IF PunchActive[i] AND (NOT PunchDone[i]) THEN
                   IF NOT candidateFound THEN
                     BufferPunchIndex := i;
-                    tmpLReal := KeepCurrentZ[i];
+                    tmpLReal := CurrentRangeStart[i] + (KeepWidth[i] / 2.0);
                     candidateFound := TRUE;
                   ELSE
-                    IF KeepCurrentZ[i] < tmpLReal THEN
+                    IF CurrentRangeStart[i] + (KeepWidth[i] / 2.0) < tmpLReal THEN
                       BufferPunchIndex := i;
-                      tmpLReal := KeepCurrentZ[i];
+                      tmpLReal := CurrentRangeStart[i] + (KeepWidth[i] / 2.0);
                     END_IF;
                   END_IF;
                 END_IF;
@@ -733,7 +822,10 @@ IF initiated THEN
                   BufferRightMostEnd := CurrentRangeEnd[BufferPunchIndex];
                 END_IF;
 
-                BufferTargetZ := BufferRightMostEnd + 100.0 + (KeepWidth[BufferPunchIndex] / 2.0);
+                BufferTargetZ := BufferRightMostEnd + 100.0 + (KeepWidth[BufferPunchIndex] / 2.0)
+                  - REAL_TO_LREAL(PunchHoleOffset[
+                    STRING_TO_INT(Retain_KeepPunchList[BufferPunchIndex,10]),
+                    STRING_TO_INT(Retain_KeepPunchList[BufferPunchIndex,11])]);
                 KeepBufferZ[BufferPunchIndex] := BufferTargetZ;
 
                 SelectedPunchIndex := BufferPunchIndex;
@@ -849,7 +941,10 @@ IF initiated THEN
 
           IF DrawerIdx <> 0 THEN
             arAxes[EN_Axes.ATC_DR].TargetPos := TO_LREAL(pDrawerParam6[DrawerIdx]);
-            arAxes[EN_Axes.ATC_Z].TargetPos := KeepCurrentZ[Current_PunchIndex];
+            arAxes[EN_Axes.ATC_Z].TargetPos := KeepCurrentZ[Current_PunchIndex]
+              + REAL_TO_LREAL(PunchHoleOffset[
+                STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]),
+                STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,11])]);
 
             arAxes[EN_Axes.ATC_DR].AxisTravelRequestAbs := TRUE;
             arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
@@ -940,13 +1035,16 @@ IF initiated THEN
         PKeep_SH_SubState.PKSH_PICK_CLAMP_OFF_CMD:
           Fmsc_PLC_IO.Press_Upper_ClampOn := FALSE;
 		  Fmsc_PLC_IO.Press_Lower_ClampOn := FALSE;
+		  ClampOff_Timer.IN:=TRUE;
           PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_WAIT_CLAMP_OFF;
 		  
         PKeep_SH_SubState.PKSH_PICK_WAIT_CLAMP_OFF:
-          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND NOT Fmsc_PLC_IO.Press_Lower_Clamp_Ok THEN
+
+          IF NOT Fmsc_PLC_IO.Press_Upper_Clamp_Ok AND NOT Fmsc_PLC_IO.Press_Lower_Clamp_Ok AND ClampOff_Timer.Q THEN
 			  PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_PIN2_OUT_CMD;
           END_IF;
         PKeep_SH_SubState.PKSH_PICK_PIN2_OUT_CMD:
+		  ClampOff_Timer.IN:=FALSE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Inside_Valve := FALSE;
           Fmsc_PLC_IO.Shuttle_Pin2_Move_Outside_Valve := TRUE;
           PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_PICK_WAIT_PIN2_OUT;
@@ -995,7 +1093,10 @@ IF initiated THEN
           PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_REQ;
 
         PKeep_SH_SubState.PKSH_DSLIDE_Z_TARGET_REQ:
-          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex];
+          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex]
+            + REAL_TO_LREAL(PunchHoleOffset[
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]),
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,11])]);
           arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
           SH_Z_MoveRequested := TRUE;
           SH_Z_Done := FALSE;
@@ -1118,7 +1219,10 @@ IF initiated THEN
 
 
         PKeep_SH_SubState.PKSH_PNP_Z_TARGET_REQ:
-          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex];
+          arAxes[EN_Axes.ATC_Z].TargetPos := KeepNewZ[Current_PunchIndex]
+            + REAL_TO_LREAL(PunchHoleOffset[
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]),
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,11])]);
           arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
           SH_Z_MoveRequested := TRUE;
           SH_Z_Done := FALSE;
@@ -1291,7 +1395,10 @@ IF initiated THEN
 		  
 		  
         PKeep_SH_SubState.PKSH_BUF_Z_BUFFER_REQ:
-          arAxes[EN_Axes.ATC_Z].TargetPos := BufferTargetZ;
+          arAxes[EN_Axes.ATC_Z].TargetPos := BufferTargetZ
+            + REAL_TO_LREAL(PunchHoleOffset[
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]),
+              STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,11])]);
           arAxes[EN_Axes.ATC_Z].AxisTravelRequestAbs := TRUE;
 
           SH_Z_MoveRequested := TRUE;
@@ -1478,22 +1585,25 @@ IF initiated THEN
           PKeep_SH_SubStates := PKeep_SH_SubState.PKSH_COMMIT_MARK_RESULT;
 
         PKeep_SH_SubState.PKSH_COMMIT_MARK_RESULT:
+          tmpLReal := REAL_TO_LREAL(PunchHoleOffset[
+            STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,10]),
+            STRING_TO_INT(Retain_KeepPunchList[Current_PunchIndex,11])]);
           IF SelectedWasBufferMove THEN
             PunchBuffered[Current_PunchIndex] := TRUE;
             PunchDone[Current_PunchIndex] := FALSE;
             KeepCurrentZ[Current_PunchIndex] := BufferTargetZ;
 
             tmpHalfWidth := KeepWidth[Current_PunchIndex] / 2.0;
-            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] - tmpHalfWidth;
-            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpHalfWidth;
+            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpLReal - tmpHalfWidth;
+            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpLReal + tmpHalfWidth;
           ELSE
             PunchBuffered[Current_PunchIndex] := FALSE;
             PunchDone[Current_PunchIndex] := TRUE;
             KeepCurrentZ[Current_PunchIndex] := KeepNewZ[Current_PunchIndex];
 
             tmpHalfWidth := KeepWidth[Current_PunchIndex] / 2.0;
-            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] - tmpHalfWidth;
-            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpHalfWidth;
+            CurrentRangeStart[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpLReal - tmpHalfWidth;
+            CurrentRangeEnd[Current_PunchIndex] := KeepCurrentZ[Current_PunchIndex] + tmpLReal + tmpHalfWidth;
           END_IF;
 
           SelectedWasBufferMove := FALSE;
@@ -1551,4 +1661,4 @@ END_IF;
 (* Edge memory update *)
 (* ------------------------------------------------------------ *)
 lastStartCmd := KeepStartCmd;
-//(* Punch_Keeping.V7 *).
+//(* Punch_Keeping.V8: PunchHoleOffset, indeks kontrolu ve ClampOff timer cagrisi eklendi. *).
